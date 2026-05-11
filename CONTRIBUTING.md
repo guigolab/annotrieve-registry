@@ -21,6 +21,17 @@
 - URLs must be reachable from the internet and point at data suitable for indexing (see CI checks).
 - Prefer smaller GFFs when possible: PR validation downloads each **new** row’s file and runs a full **sort → bgzip → tabix** pipeline; very large files may hit CI timeouts or size limits.
 
+## Tuning concurrency (optional)
+
+The validator uses bounded parallelism so large PRs (thousands of rows) finish without overwhelming the runner or remote hosts. Override via environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `VALIDATE_ASSEMBLY_WORKERS` | 24 | Concurrent NCBI assembly lookups (HTTPS API) |
+| `VALIDATE_URL_HEAD_WORKERS` | 24 | Concurrent URL reachability checks |
+| `VALIDATE_DOWNLOAD_WORKERS` | 6 | Parallel GFF download + tabix pipeline |
+| `VALIDATE_HTTP_USER_AGENT` | (bundled string) | `User-Agent` for HTTP requests |
+
 ## CI validation (on every PR)
 
 For each affected project:

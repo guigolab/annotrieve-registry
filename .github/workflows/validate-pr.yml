@@ -27,14 +27,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tabix curl
 
-      - name: Install NCBI datasets CLI
-        run: |
-          curl -fsSL -o datasets \
-            'https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/LATEST/linux-amd64/datasets'
-          chmod +x datasets
-          sudo mv datasets /usr/local/bin/
-          datasets --version
-
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 

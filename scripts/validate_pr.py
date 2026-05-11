@@ -13,15 +13,16 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 import yaml
@@ -37,6 +38,34 @@ DEFAULT_MAX_DOWNLOAD_BYTES = int(
     os.environ.get("VALIDATE_MAX_DOWNLOAD_BYTES", str(500 * 1024 * 1024))
 )
 HTTP_TIMEOUT = int(os.environ.get("VALIDATE_HTTP_TIMEOUT", "120"))
+
+# Concurrency (avoid hammering NCBI / remote hosts on huge PRs)
+ASSEMBLY_CHECK_WORKERS = max(
+    1, int(os.environ.get("VALIDATE_ASSEMBLY_WORKERS", "24"))
+)
+URL_HEAD_WORKERS = max(1, int(os.environ.get("VALIDATE_URL_HEAD_WORKERS", "24")))
+DOWNLOAD_VALIDATE_WORKERS = max(
+    1, int(os.environ.get("VALIDATE_DOWNLOAD_WORKERS", "6"))
+)
+
+USER_AGENT = os.environ.get(
+    "VALIDATE_HTTP_USER_AGENT",
+    "annotrieve-registry-validator/1.0 (+https://github.com)",
+)
+
+NCBI_DATASET_REPORT_TMPL = (
+    "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/{acc}/dataset_report"
+)
+
+_thread_local = threading.local()
+
+
+def _session() -> requests.Session:
+    if getattr(_thread_local, "session", None) is None:
+        s = requests.Session()
+        s.headers["User-Agent"] = USER_AGENT
+        _thread_local.session = s
+    return _thread_local.session
 
 
 def run_git(repo: str, *args: str) -> str:
@@ -331,23 +360,92 @@ def run_tabix_pipeline(
     return True, ""
 
 
-def ncbi_assembly_exists(datasets_bin: str, accession: str) -> tuple[bool, str]:
-    r = subprocess.run(
-        [
-            datasets_bin,
-            "summary",
-            "genome",
-            "accession",
-            accession,
-            "--as-json",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode == 0 and r.stdout.strip():
-        return True, ""
-    err = (r.stderr or r.stdout or "unknown error")[:500]
-    return False, err
+def assembly_exists_ncbi_http(session: requests.Session, accession: str) -> tuple[bool, str]:
+    """
+    Resolve assembly via NCBI Datasets v2 HTTPS API (same metadata as NCBI FTP genomes).
+    Try HEAD first; if unsupported or ambiguous, use a streaming GET without reading the body.
+    """
+    url = NCBI_DATASET_REPORT_TMPL.format(acc=quote(accession, safe=""))
+    try:
+        h = session.head(url, allow_redirects=True, timeout=min(45, HTTP_TIMEOUT))
+        sc = h.status_code
+        h.close()
+        if sc == 200:
+            return True, ""
+        if sc == 404:
+            return False, "assembly not found (HTTP 404)"
+        if 400 <= sc < 500 and sc != 405:
+            return False, f"HTTP {sc} on HEAD"
+    except requests.RequestException as e:
+        return False, str(e)[:500]
+
+    try:
+        with session.get(
+            url,
+            allow_redirects=True,
+            timeout=min(45, HTTP_TIMEOUT),
+            stream=True,
+            headers={"Accept": "application/json"},
+        ) as r:
+            if r.status_code == 200:
+                return True, ""
+            detail = (r.text or "")[:300].replace("\n", " ")
+            return False, f"HTTP {r.status_code}: {detail}"
+    except requests.RequestException as e:
+        return False, str(e)[:500]
+
+
+def bulk_assembly_lookup(
+    accessions: list[str], max_workers: int
+) -> dict[str, tuple[bool, str]]:
+    """Concurrent assembly checks; deduped; results keyed by accession."""
+    seen: list[str] = []
+    found: set[str] = set()
+    for a in accessions:
+        if a not in found:
+            found.add(a)
+            seen.append(a)
+    out: dict[str, tuple[bool, str]] = {}
+
+    def one(acc: str) -> tuple[str, tuple[bool, str]]:
+        sess = _session()
+        return acc, assembly_exists_ncbi_http(sess, acc)
+
+    if not seen:
+        return out
+    workers = min(max_workers, len(seen))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(one, acc) for acc in seen]
+        for fut in as_completed(futures):
+            acc, result = fut.result()
+            out[acc] = result
+    return out
+
+
+def bulk_url_head_lookup(
+    urls: list[str], max_workers: int
+) -> dict[str, tuple[bool, str]]:
+    """Concurrent URL reachability (HEAD / range GET). Deduped."""
+    seen: list[str] = []
+    found: set[str] = set()
+    for u in urls:
+        if u not in found:
+            found.add(u)
+            seen.append(u)
+    out: dict[str, tuple[bool, str]] = {}
+
+    def one(url: str) -> tuple[str, tuple[bool, str]]:
+        return url, head_url_ok(url)
+
+    if not seen:
+        return out
+    workers = min(max_workers, len(seen))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(one, u) for u in seen]
+        for fut in as_completed(futures):
+            url, result = fut.result()
+            out[url] = result
+    return out
 
 
 def parse_tsv_data_lines(
@@ -390,10 +488,20 @@ def new_rows_from_diff(base_content: str | None, head_content: str) -> tuple[lis
 
 
 def parse_row_line(line: str) -> tuple[str | None, str | None, str | None]:
-    parts = line.split("\t")
+    """Strict TSV: exactly two fields separated by a single tab."""
+    raw = line.strip()
+    if not raw:
+        return None, None, "empty line"
+    parts = raw.split("\t")
     if len(parts) != 2:
-        return None, None, f"expected 2 columns, got {len(parts)}"
+        return (
+            None,
+            None,
+            f"expected exactly 2 tab-separated columns, got {len(parts)}",
+        )
     acc, url = parts[0].strip(), parts[1].strip()
+    if not acc or not url:
+        return None, None, "empty assembly_accession or access_url"
     return acc, url, None
 
 
@@ -418,41 +526,56 @@ def duplicate_accessions(head_lines: list[str]) -> list[str]:
     return [a for a, c in counts.items() if c > 1]
 
 
-def validate_parsed_row(
-    datasets_bin: str,
+def classify_row_before_heavy(
+    acc: str | None,
+    url: str | None,
+    perr: str | None,
+    assembly_cache: dict[str, tuple[bool, str]],
+    url_cache: dict[str, tuple[bool, str]],
+) -> tuple[list[str], bool]:
+    """
+    Cheap checks + cached assembly / URL head results.
+    Returns (errors, needs_heavy_validation).
+    """
+    if perr:
+        return [perr], False
+    if not acc or not url:
+        return ["empty assembly_accession or access_url"], False
+    if not ASSEMBLY_RE.match(acc):
+        return [
+            f"assembly_accession format invalid (need GCA_/GCF_…): {acc!r}",
+        ], False
+
+    ok_a, msg_a = assembly_cache[acc]
+    if not ok_a:
+        return [f"NCBI assembly check failed: {msg_a}"], False
+
+    try:
+        if urlparse(url).scheme not in ("http", "https"):
+            return [f"URL must be http(s): {url!r}"], False
+    except Exception as e:
+        return [f"URL parse error: {e}"], False
+
+    ok_u, msg_u = url_cache.get(url, (False, "URL not checked (internal)"))
+    if not ok_u:
+        return [f"URL not reachable: {msg_u}"], False
+
+    return [], True
+
+
+def validate_row_heavy(
     acc: str,
     url: str,
     max_download_bytes: int | None,
 ) -> list[str]:
-    """Run checks after assembly_accession and access_url have been parsed."""
+    """Download GFF, scan attributes, tabix pipeline (I/O heavy)."""
     errs: list[str] = []
-    if not acc or not url:
-        return ["empty assembly_accession or access_url"]
-    if not ASSEMBLY_RE.match(acc):
-        errs.append(f"assembly_accession format invalid (need GCA_/GCF_…): {acc!r}")
-        return errs
-
-    ok_a, msg_a = ncbi_assembly_exists(datasets_bin, acc)
-    if not ok_a:
-        errs.append(f"NCBI assembly check failed: {msg_a}")
-
-    try:
-        if urlparse(url).scheme not in ("http", "https"):
-            errs.append(f"URL must be http(s): {url!r}")
-    except Exception as e:
-        errs.append(f"URL parse error: {e}")
-
-    ok_u, msg_u = head_url_ok(url)
-    if not ok_u:
-        errs.append(f"URL not reachable: {msg_u}")
-
-    with tempfile.TemporaryDirectory(prefix="arv_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="arv_h_") as tmp:
         tdir = Path(tmp)
         dl = tdir / "download.bin"
         ok_d, msg_d = download_to_path(url, dl, max_download_bytes)
         if not ok_d:
-            errs.append(f"download failed: {msg_d}")
-            return errs
+            return [f"download failed: {msg_d}"]
 
         ok_g, msg_g = check_gff3_id_parent(dl, SCAN_BYTES)
         if not ok_g:
@@ -463,17 +586,6 @@ def validate_parsed_row(
             errs.append(f"tabix pipeline: {msg_t}")
 
     return errs
-
-
-def validate_row(
-    datasets_bin: str,
-    line: str,
-    max_download_bytes: int | None,
-) -> list[str]:
-    acc, url, perr = parse_row_line(line)
-    if perr:
-        return [perr]
-    return validate_parsed_row(datasets_bin, acc, url, max_download_bytes)
 
 
 @dataclass
@@ -496,7 +608,6 @@ def run_validation(
     head_sha: str,
     merge_base: str,
     schema: dict[str, Any],
-    datasets_bin: str,
     max_download_bytes: int | None,
 ) -> ValidationOutput:
     repo = str(repo_root)
@@ -559,8 +670,9 @@ def run_validation(
                 _fmt_inline_body("manifest.yaml (JSON Schema)", merrs),
             )
 
-    # --- annotations.tsv per project
+    # --- annotations.tsv per project (collect new rows; validate in bulk below)
     dup_issue_paths: list[str] = []
+    all_jobs: list[dict[str, Any]] = []
 
     for proj in sorted(projects):
         apath = f"{proj}/annotations.tsv"
@@ -624,48 +736,124 @@ def run_validation(
             continue
 
         for nl in new_lines:
-            preferred = line_numbers_matching_row(head_raw, nl)
-            acc, url, perr = parse_row_line(nl)
-            if perr:
-                overall_ok = False
-                invalid_new_rows += 1
-                append_inline_review(
-                    inline_comments,
-                    apath,
-                    a_commentable,
-                    preferred,
-                    _fmt_inline_body(
-                        "Could not parse columns",
-                        [
-                            "Expected `assembly_accession` then `access_url` "
-                            "(tab between columns).",
-                            perr,
-                        ],
-                    ),
-                )
-                continue
-
-            errs = validate_parsed_row(
-                datasets_bin,
-                acc,
-                url,
-                max_download_bytes,
+            all_jobs.append(
+                {
+                    "apath": apath,
+                    "nl": nl,
+                    "preferred": line_numbers_matching_row(head_raw, nl),
+                    "a_commentable": a_commentable,
+                }
             )
-            if errs:
-                overall_ok = False
-                invalid_new_rows += 1
-                append_inline_review(
-                    inline_comments,
-                    apath,
-                    a_commentable,
-                    preferred,
-                    _fmt_inline_body(
-                        f"`{acc}`",
-                        errs,
-                    ),
-                )
+
+    # Bulk assembly (NCBI HTTPS) + URL HEAD; bounded parallel download/tabix
+    for job in all_jobs:
+        acc, url, perr = parse_row_line(job["nl"])
+        job["acc"] = acc
+        job["url"] = url
+        job["perr"] = perr
+
+    accs = sorted(
+        {
+            j["acc"]
+            for j in all_jobs
+            if not j["perr"] and j["acc"] and ASSEMBLY_RE.match(j["acc"])
+        }
+    )
+    assembly_cache = bulk_assembly_lookup(accs, ASSEMBLY_CHECK_WORKERS)
+
+    seen_urls: set[str] = set()
+    urls_to_head: list[str] = []
+    for j in all_jobs:
+        if j["perr"]:
+            continue
+        acc, url = j["acc"], j["url"]
+        if not acc or not ASSEMBLY_RE.match(acc):
+            continue
+        ok_a, _ = assembly_cache.get(acc, (False, ""))
+        if not ok_a:
+            continue
+        try:
+            if urlparse(url).scheme not in ("http", "https"):
+                continue
+        except Exception:
+            continue
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            urls_to_head.append(url)
+
+    url_cache = bulk_url_head_lookup(urls_to_head, URL_HEAD_WORKERS)
+
+    row_results: dict[tuple[str, str], list[str]] = {}
+    heavy_jobs: list[dict[str, Any]] = []
+
+    for j in all_jobs:
+        errs, need_heavy = classify_row_before_heavy(
+            j["acc"],
+            j["url"],
+            j["perr"],
+            assembly_cache,
+            url_cache,
+        )
+        key = (j["apath"], j["nl"])
+        if not need_heavy:
+            row_results[key] = errs
+        else:
+            heavy_jobs.append(j)
+
+    if heavy_jobs:
+        w = min(DOWNLOAD_VALIDATE_WORKERS, len(heavy_jobs))
+        with ThreadPoolExecutor(max_workers=w) as ex:
+            fut_to_job = {
+                ex.submit(
+                    validate_row_heavy,
+                    j["acc"],
+                    j["url"],
+                    max_download_bytes,
+                ): j
+                for j in heavy_jobs
+            }
+            for fut in as_completed(fut_to_job):
+                job = fut_to_job[fut]
+                key = (job["apath"], job["nl"])
+                try:
+                    row_results[key] = fut.result()
+                except Exception as e:
+                    row_results[key] = [f"heavy validation error: {e}"]
+
+    for j in all_jobs:
+        key = (j["apath"], j["nl"])
+        errs = row_results[key]
+        apath = j["apath"]
+        preferred = j["preferred"]
+        a_commentable = j["a_commentable"]
+        acc = j["acc"]
+        perr = j["perr"]
+
+        if errs:
+            overall_ok = False
+            invalid_new_rows += 1
+            if perr:
+                title = "Could not parse columns"
+                bullets = [
+                    "Expected `assembly_accession` then `access_url` "
+                    "(tab between columns).",
+                    *errs,
+                ]
+            elif acc:
+                title = f"`{acc}`"
+                bullets = errs
             else:
-                valid_new_rows += 1
+                title = "Row validation"
+                bullets = errs
+            append_inline_review(
+                inline_comments,
+                apath,
+                a_commentable,
+                preferred,
+                _fmt_inline_body(title, bullets),
+            )
+        else:
+            valid_new_rows += 1
 
     summary_lines = [
         COMMENT_MARKER,
@@ -705,11 +893,6 @@ def main() -> int:
     ap.add_argument("--base", required=True, help="Base commit SHA (e.g. PR base)")
     ap.add_argument("--head", required=True, help="Head commit SHA (e.g. PR head)")
     ap.add_argument(
-        "--datasets-binary",
-        default=os.environ.get("DATASETS_BINARY", "datasets"),
-        help="Path to NCBI datasets CLI",
-    )
-    ap.add_argument(
         "--max-download-mb",
         type=int,
         default=None,
@@ -734,15 +917,6 @@ def main() -> int:
         print("Not a git repository (missing .git)", file=sys.stderr)
         return 2
 
-    ds_arg = args.datasets_binary
-    if os.path.isfile(ds_arg):
-        datasets_bin = os.path.abspath(ds_arg)
-    elif shutil.which(ds_arg):
-        datasets_bin = shutil.which(ds_arg)
-    else:
-        print(f"NCBI datasets CLI not found: {ds_arg}", file=sys.stderr)
-        return 2
-
     max_bytes = DEFAULT_MAX_DOWNLOAD_BYTES
     if args.max_download_mb is not None:
         max_bytes = args.max_download_mb * 1024 * 1024
@@ -756,7 +930,6 @@ def main() -> int:
         args.head,
         merge_base,
         schema,
-        datasets_bin,
         max_bytes,
     )
 
