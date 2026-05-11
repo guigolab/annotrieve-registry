@@ -24,8 +24,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tabix curl
+          sudo apt-get update -qq
+          sudo apt-get install -y tabix
+
+      - name: Install NCBI datasets CLI
+        run: |
+          curl -fsSL \
+            'https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/LATEST/linux-amd64/datasets' \
+            -o /usr/local/bin/datasets
+          chmod +x /usr/local/bin/datasets
+          datasets --version
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
@@ -34,6 +42,14 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Optional: set NCBI_API_KEY secret to raise NCBI rate limit (3 → 10 req/s)
+          NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+          # Tuning knobs (uncomment and adjust if needed):
+          # VALIDATE_DATASETS_BATCH_SIZE: "2000"
+          # VALIDATE_URL_HEAD_WORKERS: "4"
+          # VALIDATE_DOWNLOAD_WORKERS: "3"
+          # VALIDATE_MAX_DOWNLOAD_BYTES: "524288000"
+          # VALIDATE_SCAN_BYTES: "52428800"
         run: |
           set +e
           python scripts/validate_pr.py \
@@ -43,7 +59,8 @@ jobs:
             --output-inline-json validation-inline.json
           ec=$?
           if [ ! -f validation-summary.md ]; then
-            printf '%s\n\n### Validator error\n\nThe validation script exited before writing a summary.\n' '<!-- annotrieve-registry-validation -->' > validation-summary.md
+            printf '%s\n\n### Validator error\n\nThe validation script exited before writing a summary.\n' \
+              '<!-- annotrieve-registry-validation -->' > validation-summary.md
           fi
           if [ ! -f validation-inline.json ]; then
             echo '[]' > validation-inline.json
@@ -73,12 +90,7 @@ jobs:
             }
             const payload = comments
               .filter((c) => c.path && c.line && c.body)
-              .map((c) => ({
-                path: c.path,
-                line: Number(c.line),
-                side: 'RIGHT',
-                body: c.body,
-              }));
+              .map((c) => ({ path: c.path, line: Number(c.line), side: 'RIGHT', body: c.body }));
             if (payload.length === 0) return;
             try {
               await github.rest.pulls.createReview({
@@ -90,7 +102,7 @@ jobs:
                 comments: payload,
               });
             } catch (e) {
-              console.error('createReview failed (inline comments):', e.message || e);
+              console.error('createReview failed:', e.message || e);
             }
 
       - name: Post or update PR summary comment

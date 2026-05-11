@@ -27,10 +27,19 @@ The validator uses bounded parallelism so large PRs (thousands of rows) finish w
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `VALIDATE_ASSEMBLY_WORKERS` | 24 | Concurrent NCBI assembly lookups (HTTPS API) |
-| `VALIDATE_URL_HEAD_WORKERS` | 24 | Concurrent URL reachability checks |
-| `VALIDATE_DOWNLOAD_WORKERS` | 6 | Parallel GFF download + tabix pipeline |
+| `VALIDATE_ASSEMBLY_WORKERS` | 6 | Concurrent NCBI assembly lookups (HTTPS API) |
+| `VALIDATE_URL_HEAD_WORKERS` | 4 | Concurrent URL reachability checks |
+| `VALIDATE_DOWNLOAD_WORKERS` | 3 | Parallel GFF download + tabix pipeline |
+| `VALIDATE_HTTP_RETRY_TOTAL` | 8 | Max retries per request (429/503/backoff via urllib3) |
+| `VALIDATE_HTTP_RETRY_BACKOFF` | 2 | urllib3 retry backoff factor (`Retry-After` honored on 429) |
+| `VALIDATE_HTTP_RETRY_STATUS` | `429,503` | Comma-separated statuses to retry |
 | `VALIDATE_HTTP_USER_AGENT` | (bundled string) | `User-Agent` for HTTP requests |
+
+HTTP uses a **Session per thread-pool worker** (same retry/pool settings; `requests.Session` is not shared across concurrent threads).
+
+## Retries on rate limits (429)
+
+`HEAD`/`GET` responses with **429** or **503** are retried automatically with exponential backoff and **Retry-After** when the server sends it.
 
 ## CI validation (on every PR)
 
@@ -39,7 +48,7 @@ For each affected project:
 - **`manifest.yaml`** is validated against the JSON Schema.
 - **`annotations.tsv`** is checked for duplicate assembly accessions (full file on your branch).
 - For **only newly added data rows** (compared to the merge base), CI verifies:
-  - Assembly accession exists in NCBI (via `datasets` CLI).
+  - Assembly accession exists in NCBI (Datasets v2 HTTPS API, with retries).
   - URL responds (HTTP).
   - Content looks like **GFF3** (at least one feature line with `ID=` and at least one with `Parent=` in the attributes column).
   - The same **tabix** normalization used by Annotrieve succeeds (`sort`, `bgzip`, `tabix -p gff --csi`).
