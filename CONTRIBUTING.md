@@ -41,7 +41,11 @@ Install Python 3.11+, `tabix`/`bgzip` (htslib), and the [NCBI datasets CLI](http
 
 ```bash
 pip install -r requirements.txt
-python scripts/validate_pr.py --base "$(git merge-base origin/main HEAD)" --head HEAD
+python scripts/validate_pr.py \
+  --base "$(git merge-base origin/main HEAD)" \
+  --head HEAD \
+  --output-summary validation-summary.md \
+  --output-inline-json validation-inline.json
 ```
 
 Adjust `--base` if your default branch is not `main`.

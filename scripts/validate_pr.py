@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -58,6 +59,105 @@ def git_merge_base(repo: str, base_sha: str, head_sha: str) -> str:
 def git_changed_files(repo: str, merge_base: str, head_sha: str) -> list[str]:
     out = run_git(repo, "diff", "--name-only", merge_base, head_sha)
     return [p.strip() for p in out.splitlines() if p.strip()]
+
+
+def git_diff_paths(repo: str, merge_base: str, head_sha: str, path: str) -> str:
+    """Unified diff for one path (may be empty)."""
+    r = subprocess.run(
+        ["git", "-C", repo, "diff", merge_base, head_sha, "--", path],
+        capture_output=True,
+        text=True,
+    )
+    return r.stdout if r.returncode == 0 else ""
+
+
+def git_added_line_numbers_right(
+    repo: str, merge_base: str, head_sha: str, path: str
+) -> set[int]:
+    """
+    1-based line numbers in `path` at head that appear as '+' additions in the
+    diff vs merge_base (GitHub PR inline comments must target changed lines).
+    """
+    diff = git_diff_paths(repo, merge_base, head_sha, path)
+    return parse_unified_diff_added_lines(diff)
+
+
+def parse_unified_diff_added_lines(diff_text: str) -> set[int]:
+    """Collect new-file line numbers for '+' rows in a single-file git diff."""
+    added: set[int] = set()
+    line_new: int | None = None
+    for line in diff_text.splitlines():
+        if line.startswith("@@"):
+            m = re.match(
+                r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@",
+                line,
+            )
+            if not m:
+                continue
+            line_new = int(m.group(1))
+            continue
+        if line_new is None:
+            continue
+        if line.startswith("+++ ") or line.startswith("--- "):
+            continue
+        if not line:
+            continue
+        prefix = line[0]
+        if prefix == "+":
+            added.add(line_new)
+            line_new += 1
+        elif prefix == " ":
+            line_new += 1
+        elif prefix == "-":
+            pass
+        elif prefix == "\\":
+            pass
+    return added
+
+
+def line_numbers_matching_row(head_raw: str, row_content: str) -> list[int]:
+    """All 1-based lines whose stripped text equals row_content.strip()."""
+    target = row_content.strip()
+    return [
+        i
+        for i, ln in enumerate(head_raw.splitlines(), start=1)
+        if ln.strip() == target
+    ]
+
+
+def iter_tsv_data_line_numbers(head_raw: str) -> list[tuple[int, str]]:
+    """Skip header (line 1); yield (line_no, raw line) for each data row."""
+    lines = head_raw.splitlines()
+    out: list[tuple[int, str]] = []
+    for i, ln in enumerate(lines[1:], start=2):
+        if not ln.strip() or ln.strip().startswith("#"):
+            continue
+        out.append((i, ln))
+    return out
+
+
+def pick_inline_line(
+    commentable: set[int], preferred_lines: list[int]
+) -> int | None:
+    """First preferred line that appears in the PR diff additions, else None."""
+    for ln in preferred_lines:
+        if ln in commentable:
+            return ln
+    return None
+
+
+def append_inline_review(
+    bucket: list[dict[str, Any]],
+    path: str,
+    commentable: set[int],
+    preferred_lines: list[int],
+    body: str,
+) -> None:
+    """Attach one PR review comment if a suitable line exists in the diff."""
+    line_no = pick_inline_line(commentable, preferred_lines)
+    if line_no is None:
+        return
+    bucket.append({"path": path, "line": line_no, "body": body.strip()})
 
 
 def git_show_text(repo: str, rev: str, path: str) -> str | None:
@@ -318,15 +418,14 @@ def duplicate_accessions(head_lines: list[str]) -> list[str]:
     return [a for a, c in counts.items() if c > 1]
 
 
-def validate_row(
+def validate_parsed_row(
     datasets_bin: str,
-    line: str,
+    acc: str,
+    url: str,
     max_download_bytes: int | None,
 ) -> list[str]:
+    """Run checks after assembly_accession and access_url have been parsed."""
     errs: list[str] = []
-    acc, url, perr = parse_row_line(line)
-    if perr:
-        return [perr]
     if not acc or not url:
         return ["empty assembly_accession or access_url"]
     if not ASSEMBLY_RE.match(acc):
@@ -366,7 +465,32 @@ def validate_row(
     return errs
 
 
-def build_report(
+def validate_row(
+    datasets_bin: str,
+    line: str,
+    max_download_bytes: int | None,
+) -> list[str]:
+    acc, url, perr = parse_row_line(line)
+    if perr:
+        return [perr]
+    return validate_parsed_row(datasets_bin, acc, url, max_download_bytes)
+
+
+@dataclass
+class ValidationOutput:
+    ok: bool
+    summary_markdown: str
+    inline_comments: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _fmt_inline_body(title: str, bullets: list[str]) -> str:
+    lines = [f"**{title}**", ""]
+    for b in bullets:
+        lines.append(f"- {b}")
+    return "\n".join(lines)
+
+
+def run_validation(
     repo_root: Path,
     base_sha: str,
     head_sha: str,
@@ -374,20 +498,20 @@ def build_report(
     schema: dict[str, Any],
     datasets_bin: str,
     max_download_bytes: int | None,
-) -> tuple[str, bool]:
+) -> ValidationOutput:
     repo = str(repo_root)
-    lines_out: list[str] = []
-    lines_out.append(COMMENT_MARKER)
-    lines_out.append("### Annotrieve registry validation")
-    lines_out.append("")
-
     changed = git_changed_files(repo, merge_base, head_sha)
     projects = split_projects(changed)
 
     overall_ok = True
     manifest_errors: dict[str, list[str]] = {}
+    inline_comments: list[dict[str, Any]] = []
 
-    # Validate manifests for touched projects
+    valid_new_rows = 0
+    invalid_new_rows = 0
+    tsv_file_parse_errors = 0
+
+    # --- Manifests
     for proj in sorted(projects):
         mpath = f"{proj}/manifest.yaml"
         raw = git_show_text(repo, head_sha, mpath)
@@ -397,116 +521,177 @@ def build_report(
             ]
             overall_ok = False
             continue
+        m_commentable = git_added_line_numbers_right(repo, merge_base, head_sha, mpath)
         try:
             doc = yaml.safe_load(raw)
         except yaml.YAMLError as e:
             manifest_errors[proj] = [f"YAML parse error: {e}"]
             overall_ok = False
+            preferred = list(range(1, min(5, len(raw.splitlines()) + 1)))
+            append_inline_review(
+                inline_comments,
+                mpath,
+                m_commentable,
+                preferred,
+                _fmt_inline_body("YAML parse error", [str(e)]),
+            )
             continue
         if doc is None:
             manifest_errors[proj] = ["empty YAML document"]
             overall_ok = False
+            append_inline_review(
+                inline_comments,
+                mpath,
+                m_commentable,
+                [1],
+                _fmt_inline_body("Empty manifest", ["manifest.yaml is empty or null."]),
+            )
             continue
         merrs = validate_manifest_doc(doc, schema)
         if merrs:
             manifest_errors[proj] = merrs
             overall_ok = False
+            append_inline_review(
+                inline_comments,
+                mpath,
+                m_commentable,
+                [1],
+                _fmt_inline_body("manifest.yaml (JSON Schema)", merrs),
+            )
 
-    lines_out.append("#### Manifest (JSON Schema)")
-    lines_out.append("")
-    if not manifest_errors:
-        lines_out.append("- **OK** — no manifest issues for touched projects.")
-    else:
-        for proj, errs in sorted(manifest_errors.items()):
-            lines_out.append(f"- **`{proj}`**")
-            for e in errs:
-                lines_out.append(f"  - {e}")
-    lines_out.append("")
-
-    # TSV: duplicates + new rows
-    row_failures: list[tuple[str, str, str, list[str]]] = []
+    # --- annotations.tsv per project
     dup_issue_paths: list[str] = []
 
     for proj in sorted(projects):
         apath = f"{proj}/annotations.tsv"
         if apath not in changed:
             continue
+        a_commentable = git_added_line_numbers_right(repo, merge_base, head_sha, apath)
+
         head_raw = git_show_text(repo, head_sha, apath)
         if head_raw is None:
-            lines_out.append(f"#### `{apath}`")
-            lines_out.append("- missing on PR branch")
             overall_ok = False
             continue
         base_raw = git_show_text(repo, merge_base, apath)
         _, head_data_lines, herr = parse_tsv_data_lines(head_raw)
         if herr:
-            lines_out.append(f"#### `{apath}`")
-            lines_out.append(f"- **parse error**: {herr}")
             overall_ok = False
+            tsv_file_parse_errors += 1
+            append_inline_review(
+                inline_comments,
+                apath,
+                a_commentable,
+                [1],
+                _fmt_inline_body("annotations.tsv header / parse", [herr]),
+            )
             continue
 
         dups = duplicate_accessions(head_data_lines)
+        dup_set = set(dups)
         if dups:
             overall_ok = False
             dup_issue_paths.append(apath)
-            lines_out.append(f"#### `{apath}` — duplicate assembly_accession")
-            for d in dups:
-                lines_out.append(f"- duplicated: `{d}`")
-            lines_out.append("")
+            for line_no, ln in iter_tsv_data_line_numbers(head_raw):
+                acc, _, perr = parse_row_line(ln)
+                if perr or not acc:
+                    continue
+                if acc in dup_set:
+                    append_inline_review(
+                        inline_comments,
+                        apath,
+                        a_commentable,
+                        [line_no],
+                        _fmt_inline_body(
+                            "Duplicate assembly_accession",
+                            [
+                                f"`{acc}` appears more than once in this file; "
+                                "keep at most one row per assembly."
+                            ],
+                        ),
+                    )
 
         new_lines, nerr = new_rows_from_diff(base_raw, head_raw)
         if nerr:
             overall_ok = False
-            lines_out.append(f"#### `{apath}`")
-            lines_out.append(f"- **diff error**: {nerr}")
-            lines_out.append("")
+            tsv_file_parse_errors += 1
+            append_inline_review(
+                inline_comments,
+                apath,
+                a_commentable,
+                [2],
+                _fmt_inline_body("Could not diff rows", [nerr]),
+            )
             continue
 
-        lines_out.append(f"#### `{apath}` — new rows ({len(new_lines)})")
-        if not new_lines:
-            lines_out.append("- no new data lines compared to merge-base.")
-        lines_out.append("")
-
         for nl in new_lines:
-            acc, url, _ = parse_row_line(nl)
-            errs = validate_row(
+            preferred = line_numbers_matching_row(head_raw, nl)
+            acc, url, perr = parse_row_line(nl)
+            if perr:
+                overall_ok = False
+                invalid_new_rows += 1
+                append_inline_review(
+                    inline_comments,
+                    apath,
+                    a_commentable,
+                    preferred,
+                    _fmt_inline_body(
+                        "Could not parse columns",
+                        [
+                            "Expected `assembly_accession` then `access_url` "
+                            "(tab between columns).",
+                            perr,
+                        ],
+                    ),
+                )
+                continue
+
+            errs = validate_parsed_row(
                 datasets_bin,
-                nl,
+                acc,
+                url,
                 max_download_bytes,
             )
             if errs:
                 overall_ok = False
-                row_failures.append((apath, acc or "?", url or "?", errs))
-            preview = nl.replace("|", "\\|")[:200]
-            status = "PASS" if not errs else "FAIL"
-            lines_out.append(f"- **{status}** `{acc}` — `{url}`")
-            lines_out.append(f"  - line: `{preview}`")
-            for e in errs:
-                lines_out.append(f"  - {e}")
-            lines_out.append("")
+                invalid_new_rows += 1
+                append_inline_review(
+                    inline_comments,
+                    apath,
+                    a_commentable,
+                    preferred,
+                    _fmt_inline_body(
+                        f"`{acc}`",
+                        errs,
+                    ),
+                )
+            else:
+                valid_new_rows += 1
 
-    lines_out.append("---")
-    lines_out.append("")
-
-    summary_parts = [
-        f"Touched projects: **{len(projects)}**.",
-        f"Manifest failures: **{len(manifest_errors)}**.",
-        f"TSV files with duplicate `assembly_accession`: **{len(dup_issue_paths)}**.",
-        f"New-row validation failures: **{len(row_failures)}**.",
-    ]
-    summary_block = [
-        "#### Summary",
+    summary_lines = [
+        COMMENT_MARKER,
+        "### Registry validation summary",
         "",
-        "- " + " ".join(summary_parts),
-        f"- merge-base: `{merge_base[:7]}…` — base `{base_sha[:7]}…` → head `{head_sha[:7]}…`",
+        "| | Count |",
+        "|--|--:|",
+        f"| Valid **new** rows | **{valid_new_rows}** |",
+        f"| Invalid **new** rows | **{invalid_new_rows}** |",
+        f"| Projects with manifest issues | **{len(manifest_errors)}** |",
+        f"| TSV files with duplicate assemblies | **{len(dup_issue_paths)}** |",
+        f"| TSV files with header / diff parse errors | **{tsv_file_parse_errors}** |",
         "",
+        f"Merge-base `{merge_base[:7]}…` · base `{base_sha[:7]}…` → head `{head_sha[:7]}…`",
+        "",
+        "**Details:** Open **Files changed** — inline review comments mark each issue on the affected line.",
+        "",
+        "_This summary comment is updated every validation run._",
     ]
-    # Insert summary directly under the title block
-    insert_at = 3
-    for i, line in enumerate(summary_block):
-        lines_out.insert(insert_at + i, line)
+    summary_md = "\n".join(summary_lines)
 
-    return "\n".join(lines_out), overall_ok
+    return ValidationOutput(
+        ok=overall_ok,
+        summary_markdown=summary_md,
+        inline_comments=inline_comments,
+    )
 
 
 def main() -> int:
@@ -531,10 +716,16 @@ def main() -> int:
         help="Max download size per row in MiB (default from VALIDATE_MAX_DOWNLOAD_BYTES)",
     )
     ap.add_argument(
-        "--output",
+        "--output-summary",
         type=Path,
         default=None,
-        help="Write markdown report to this file (default: stdout only)",
+        help="Write PR summary comment markdown (sticky summary)",
+    )
+    ap.add_argument(
+        "--output-inline-json",
+        type=Path,
+        default=None,
+        help="Write JSON array of {path, line, body} for pull request review comments",
     )
     args = ap.parse_args()
 
@@ -559,7 +750,7 @@ def main() -> int:
     merge_base = git_merge_base(str(repo_root), args.base, args.head)
     schema = load_schema(repo_root)
 
-    report, ok = build_report(
+    result = run_validation(
         repo_root,
         args.base,
         args.head,
@@ -569,11 +760,16 @@ def main() -> int:
         max_bytes,
     )
 
-    print(report)
-    if args.output:
-        args.output.write_text(report, encoding="utf-8")
+    print(result.summary_markdown)
+    if args.output_summary:
+        args.output_summary.write_text(result.summary_markdown, encoding="utf-8")
+    if args.output_inline_json:
+        args.output_inline_json.write_text(
+            json.dumps(result.inline_comments, indent=2),
+            encoding="utf-8",
+        )
 
-    return 0 if ok else 1
+    return 0 if result.ok else 1
 
 
 if __name__ == "__main__":

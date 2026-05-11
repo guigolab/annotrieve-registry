@@ -18,6 +18,8 @@ See [`schema/annotations.tsv.header`](schema/annotations.tsv.header) for the exa
 
 Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the pull-request workflow and what CI validates on each PR.
 
+On pull requests, CI posts a **short summary** on the conversation tab and leaves **inline review comments** on each problem line under **Files changed** (via GitHub pull request reviews).
+
 ## Example
 
 [`examples/sample_project/`](examples/sample_project/) is a template you can copy when adding a new project folder.

@@ -1,4 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
-validation-report.md
+validation-summary.md
+validation-inline.json
+test/
