@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/annotrieve/annotrieve-registry/schema/manifest.schema.json",
+  "title": "Annotrieve community project manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider_name", "pipeline_method", "pipeline_version"],
+  "properties": {
+    "provider_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Organization or person providing the annotations"
+    },
+    "pipeline_method": {
+      "type": "string",
+      "minLength": 1,
+      "description": "How annotations were produced (e.g. tool chain or method name)"
+    },
+    "pipeline_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Version label for the pipeline or release"
+    },
+    "project_display_name": {
+      "type": "string",
+      "description": "Human-readable project title"
+    },
+    "description": {
+      "type": "string",
+      "description": "Short description of the dataset"
+    },
+    "contact_email": {
+      "type": "string",
+      "format": "email",
+      "description": "Contact for questions about this submission"
+    },
+    "license": {
+      "type": "string",
+      "description": "SPDX license id or license name"
+    },
+    "homepage_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Project or publication URL"
+    }
+  }
+}
