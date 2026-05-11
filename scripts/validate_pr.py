@@ -61,8 +61,7 @@ DATASETS_BATCH_SIZE = max(
 )
 DATASETS_TIMEOUT = int(os.environ.get("VALIDATE_DATASETS_TIMEOUT", "300"))
 
-# Thread pools for URL HEAD + GFF/tabix downloads (NCBI assembly uses CLI, not threads)
-URL_HEAD_WORKERS = max(1, int(os.environ.get("VALIDATE_URL_HEAD_WORKERS", "4")))
+# Thread pool for GFF/tabix downloads (NCBI assembly uses CLI; URL check is implicit in download)
 DOWNLOAD_VALIDATE_WORKERS = max(
     1, int(os.environ.get("VALIDATE_DOWNLOAD_WORKERS", "3"))
 )
@@ -87,18 +86,18 @@ _HTTP_RETRY_STATUS: tuple[int, ...] = tuple(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_http_session() -> requests.Session:
-    """Session with retry-on-429/503 and a connection pool sized to worker count."""
+    """Session with retry-on-429/503 and a connection pool sized to download workers."""
     s = requests.Session()
     s.headers["User-Agent"] = USER_AGENT
     retry = Retry(
         total=_HTTP_RETRY_TOTAL,
         backoff_factor=_HTTP_RETRY_BACKOFF,
         status_forcelist=_HTTP_RETRY_STATUS,
-        allowed_methods=("HEAD", "GET"),
+        allowed_methods=("GET",),
         respect_retry_after_header=True,
         raise_on_status=False,
     )
-    pool = max(URL_HEAD_WORKERS, DOWNLOAD_VALIDATE_WORKERS) + 4
+    pool = DOWNLOAD_VALIDATE_WORKERS + 4
     adapter = HTTPAdapter(
         max_retries=retry,
         pool_connections=pool,
@@ -380,7 +379,8 @@ def download_check_gff3_stream(
         with session.get(
             url, stream=True, allow_redirects=True, timeout=HTTP_TIMEOUT
         ) as r:
-            r.raise_for_status()
+            if r.status_code >= 400:
+                return False, f"HTTP {r.status_code}", False, ""
             n = 0
             with open(dest, "wb") as out:
                 for chunk in r.iter_content(chunk_size=65536):
@@ -448,51 +448,6 @@ def download_check_gff3_stream(
     except OSError as e:
         return False, str(e), False, ""
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# URL reachability (HEAD → GET range fallback)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def head_url_ok(session: requests.Session, url: str) -> tuple[bool, str]:
-    try:
-        r = session.head(url, allow_redirects=True, timeout=HTTP_TIMEOUT, stream=True)
-        r.close()
-        if r.status_code in (405, 501, 404):
-            g = session.get(
-                url,
-                allow_redirects=True,
-                timeout=HTTP_TIMEOUT,
-                stream=True,
-                headers={"Range": "bytes=0-0"},
-            )
-            g.close()
-            if g.status_code >= 400:
-                return False, f"HTTP {g.status_code} on GET range"
-            return True, ""
-        if r.status_code >= 400:
-            return False, f"HTTP {r.status_code} on HEAD"
-        return True, ""
-    except requests.RequestException as e:
-        return False, str(e)
-
-
-def bulk_url_head_lookup(
-    urls: list[str],
-    max_workers: int,
-) -> dict[str, tuple[bool, str]]:
-    """Concurrent HEAD checks for a deduped list of URLs."""
-    seen = list(dict.fromkeys(urls))
-    if not seen:
-        return {}
-
-    def _one(url: str) -> tuple[str, tuple[bool, str]]:
-        return url, head_url_ok(worker_http_session(), url)
-
-    out: dict[str, tuple[bool, str]] = {}
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(seen))) as ex:
-        for url, result in (f.result() for f in as_completed(ex.submit(_one, u) for u in seen)):
-            out[url] = result
-    return out
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -632,9 +587,12 @@ def classify_cheap(
     url: str | None,
     perr: str | None,
     asm_cache: dict[str, tuple[bool, str]],
-    url_cache: dict[str, tuple[bool, str]],
 ) -> tuple[list[str], bool]:
-    """Fast pre-checks from caches. Returns (errors, needs_heavy)."""
+    """
+    Fast pre-checks (parse error, accession format, NCBI existence, URL scheme).
+    URL reachability is verified implicitly during the streaming download.
+    Returns (errors, needs_heavy).
+    """
     if perr:
         return [perr], False
     if not acc or not url:
@@ -651,10 +609,6 @@ def classify_cheap(
             return [f"URL must be http(s): {url!r}"], False
     except Exception as e:
         return [f"URL parse error: {e}"], False
-
-    ok_u, msg_u = url_cache.get(url, (False, "URL not checked (internal)"))
-    if not ok_u:
-        return [f"URL not reachable: {msg_u}"], False
 
     return [], True
 
@@ -801,34 +755,12 @@ def run_validation(
             datasets_bin, valid_accs, DATASETS_BATCH_SIZE
         )
 
-        # 3b. URL reachability — only for rows that passed assembly check
-        urls_to_check: list[str] = []
-        seen_urls: set[str] = set()
-        for j in all_jobs:
-            if j["perr"]:
-                continue
-            acc, url = j["acc"], j["url"]
-            if not acc or not ASSEMBLY_RE.match(acc):
-                continue
-            ok_a, _ = asm_cache.get(acc, (False, ""))
-            if not ok_a:
-                continue
-            try:
-                if urlparse(url).scheme not in ("http", "https"):
-                    continue
-            except Exception:
-                continue
-            if url not in seen_urls:
-                seen_urls.add(url)
-                urls_to_check.append(url)
-
-        url_cache = bulk_url_head_lookup(urls_to_check, URL_HEAD_WORKERS)
-
-        # 3c. Split into cheap-fail vs heavy (download + GFF3 + tabix)
+        # 3b. Split into cheap-fail vs heavy (download + GFF3 + tabix)
+        # URL reachability is checked implicitly at the start of the streaming download.
         heavy_jobs: list[dict[str, Any]] = []
         for j in all_jobs:
             errs, need_heavy = classify_cheap(
-                j["acc"], j["url"], j["perr"], asm_cache, url_cache
+                j["acc"], j["url"], j["perr"], asm_cache
             )
             key = (j["apath"], j["nl"])
             if not need_heavy:
@@ -836,7 +768,7 @@ def run_validation(
             else:
                 heavy_jobs.append(j)
 
-        # 3d. Heavy validation (parallel, bounded)
+        # 3c. Heavy validation (parallel, bounded)
         if heavy_jobs:
             w = min(DOWNLOAD_VALIDATE_WORKERS, len(heavy_jobs))
             with ThreadPoolExecutor(max_workers=w) as ex:
