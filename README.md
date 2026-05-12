@@ -1,6 +1,6 @@
 # Annotrieve community annotations registry
 
-This repository lists **community-contributed genome annotations** in a structured form so they can be reviewed and, once merged, consumed by [Annotrieve](https://github.com/guigolab/annotrieve) alongside curated feeds such as [genome-annotation-tracker](https://github.com/guigolab/genome-annotation-tracker).
+This repository lists **community-contributed genome annotations** in a structured form so they can be reviewed and, once merged, consumed by  [genome-annotation-tracker](https://github.com/guigolab/genome-annotation-tracker) and then feeded to [Annotrieve](https://genome.crg.eu/annotrieve)
 
 ## Layout
 
