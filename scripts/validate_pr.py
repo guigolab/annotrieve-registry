@@ -864,9 +864,10 @@ def main() -> int:
         max_bytes,
     )
 
-    print(result.summary_markdown)
     if args.output_summary:
         args.output_summary.write_text(result.summary_markdown, encoding="utf-8")
+    else:
+        print(result.summary_markdown)
     if args.output_rdjsonl:
         lines = [json.dumps(d, ensure_ascii=False) for d in result.diagnostics]
         args.output_rdjsonl.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
