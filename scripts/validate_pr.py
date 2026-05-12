@@ -12,8 +12,6 @@ streaming download used for the tabix pipeline (single HTTP connection per file)
 from __future__ import annotations
 
 import argparse
-import gzip
-import io
 import json
 import os
 import re
@@ -143,43 +141,6 @@ def git_changed_files(repo: str, merge_base: str, head_sha: str) -> list[str]:
     return [p.strip() for p in out.splitlines() if p.strip()]
 
 
-def git_diff_path(repo: str, merge_base: str, head_sha: str, path: str) -> str:
-    r = subprocess.run(
-        ["git", "-C", repo, "diff", merge_base, head_sha, "--", path],
-        capture_output=True,
-        text=True,
-    )
-    return r.stdout if r.returncode == 0 else ""
-
-
-def git_added_line_numbers(
-    repo: str, merge_base: str, head_sha: str, path: str
-) -> set[int]:
-    """1-based line numbers of '+' additions in the diff (for PR inline comments)."""
-    return _parse_diff_added_lines(git_diff_path(repo, merge_base, head_sha, path))
-
-
-def _parse_diff_added_lines(diff: str) -> set[int]:
-    added: set[int] = set()
-    cur: int | None = None
-    for line in diff.splitlines():
-        if line.startswith("@@"):
-            m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-            cur = int(m.group(1)) if m else None
-            continue
-        if cur is None or line.startswith("+++ ") or line.startswith("--- "):
-            continue
-        if not line:
-            continue
-        p = line[0]
-        if p == "+":
-            added.add(cur)
-            cur += 1
-        elif p == " ":
-            cur += 1
-    return added
-
-
 def git_show_text(repo: str, rev: str, path: str) -> str | None:
     r = subprocess.run(
         ["git", "-C", repo, "show", f"{rev}:{path}"], capture_output=True
@@ -188,7 +149,7 @@ def git_show_text(repo: str, rev: str, path: str) -> str | None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Inline-review helpers
+# reviewdog rdjsonl helpers (filter-mode=added in CI)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def line_numbers_matching_row(head_raw: str, row: str) -> list[int]:
@@ -204,23 +165,23 @@ def iter_data_line_numbers(head_raw: str) -> list[tuple[int, str]]:
     return out
 
 
-def _pick_commentable(commentable: set[int], preferred: list[int]) -> int | None:
-    for ln in preferred:
-        if ln in commentable:
-            return ln
-    return None
-
-
-def append_inline(
+def emit_diagnostic(
     bucket: list[dict[str, Any]],
     path: str,
-    commentable: set[int],
-    preferred: list[int],
-    body: str,
+    line: int,
+    message: str,
+    severity: str = "ERROR",
 ) -> None:
-    ln = _pick_commentable(commentable, preferred)
-    if ln is not None:
-        bucket.append({"path": path, "line": ln, "body": body.strip()})
+    """One reviewdog rdjsonl diagnostic (line is 1-based)."""
+    bucket.append({
+        "message": message.strip(),
+        "location": {"path": path, "range": {"start": {"line": max(1, line)}}},
+        "severity": severity,
+    })
+
+
+def _line_from_preferred(preferred: list[int], fallback: int = 1) -> int:
+    return preferred[0] if preferred else fallback
 
 
 def _fmt_body(title: str, bullets: list[str]) -> str:
@@ -621,7 +582,7 @@ def classify_cheap(
 class ValidationOutput:
     ok: bool
     summary_markdown: str
-    inline_comments: list[dict[str, Any]] = field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -643,7 +604,7 @@ def run_validation(
 
     overall_ok = True
     manifest_errors: dict[str, list[str]] = {}
-    inline_comments: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
     valid_rows = 0
     invalid_rows = 0
     tsv_parse_errors = 0
@@ -659,28 +620,38 @@ def run_validation(
             ]
             overall_ok = False
             continue
-        mc = git_added_line_numbers(repo, merge_base, head_sha, mpath)
         try:
             doc = yaml.safe_load(raw)
         except yaml.YAMLError as e:
             manifest_errors[proj] = [f"YAML parse error: {e}"]
             overall_ok = False
-            preferred = list(range(1, min(5, len(raw.splitlines()) + 1)))
-            append_inline(inline_comments, mpath, mc, preferred,
-                          _fmt_body("YAML parse error", [str(e)]))
+            emit_diagnostic(
+                diagnostics,
+                mpath,
+                1,
+                _fmt_body("YAML parse error", [str(e)]),
+            )
             continue
         if doc is None:
             manifest_errors[proj] = ["empty YAML document"]
             overall_ok = False
-            append_inline(inline_comments, mpath, mc, [1],
-                          _fmt_body("Empty manifest", ["manifest.yaml is empty or null."]))
+            emit_diagnostic(
+                diagnostics,
+                mpath,
+                1,
+                _fmt_body("Empty manifest", ["manifest.yaml is empty or null."]),
+            )
             continue
         merrs = validate_manifest_doc(doc, schema)
         if merrs:
             manifest_errors[proj] = merrs
             overall_ok = False
-            append_inline(inline_comments, mpath, mc, [1],
-                          _fmt_body("manifest.yaml (JSON Schema)", merrs))
+            emit_diagnostic(
+                diagnostics,
+                mpath,
+                1,
+                _fmt_body("manifest.yaml (JSON Schema)", merrs),
+            )
 
     # ── 2. Collect new TSV rows across all projects ───────────────────────────
     all_jobs: list[dict[str, Any]] = []
@@ -689,7 +660,6 @@ def run_validation(
         apath = f"{proj}/annotations.tsv"
         if apath not in changed:
             continue
-        ac = git_added_line_numbers(repo, merge_base, head_sha, apath)
         head_raw = git_show_text(repo, head_sha, apath)
         if head_raw is None:
             overall_ok = False
@@ -700,8 +670,12 @@ def run_validation(
         if herr:
             overall_ok = False
             tsv_parse_errors += 1
-            append_inline(inline_comments, apath, ac, [1],
-                          _fmt_body("annotations.tsv header / parse", [herr]))
+            emit_diagnostic(
+                diagnostics,
+                apath,
+                1,
+                _fmt_body("annotations.tsv header / parse", [herr]),
+            )
             continue
 
         dups = duplicate_accessions(head_data)
@@ -712,8 +686,10 @@ def run_validation(
             for line_no, ln in iter_data_line_numbers(head_raw):
                 acc, _, _ = parse_row(ln)
                 if acc and acc in dup_set:
-                    append_inline(
-                        inline_comments, apath, ac, [line_no],
+                    emit_diagnostic(
+                        diagnostics,
+                        apath,
+                        line_no,
                         _fmt_body("Duplicate assembly_accession", [
                             f"`{acc}` appears more than once; keep at most one row per assembly."
                         ]),
@@ -723,8 +699,12 @@ def run_validation(
         if nerr:
             overall_ok = False
             tsv_parse_errors += 1
-            append_inline(inline_comments, apath, ac, [2],
-                          _fmt_body("Could not diff rows", [nerr]))
+            emit_diagnostic(
+                diagnostics,
+                apath,
+                2,
+                _fmt_body("Could not diff rows", [nerr]),
+            )
             continue
 
         for nl in nr:
@@ -732,7 +712,6 @@ def run_validation(
                 "apath": apath,
                 "nl": nl,
                 "preferred": line_numbers_matching_row(head_raw, nl),
-                "ac": ac,
             })
 
     # ── 3. Parse rows and populate caches ────────────────────────────────────
@@ -798,8 +777,11 @@ def run_validation(
                 ]
             else:
                 title, bullets = f"`{acc}`" if acc else "Row validation", errs
-            append_inline(
-                inline_comments, j["apath"], j["ac"], j["preferred"],
+            ln = _line_from_preferred(j["preferred"], 1)
+            emit_diagnostic(
+                diagnostics,
+                j["apath"],
+                ln,
                 _fmt_body(title, bullets),
             )
         else:
@@ -808,27 +790,21 @@ def run_validation(
     # ── 5. Build summary comment ──────────────────────────────────────────────
     summary_md = "\n".join([
         COMMENT_MARKER,
-        "### Registry validation summary",
+        "### Registry validation",
         "",
-        "| | Count |",
-        "|--|--:|",
-        f"| Valid **new** rows | **{valid_rows}** |",
-        f"| Invalid **new** rows | **{invalid_rows}** |",
-        f"| Projects with manifest issues | **{len(manifest_errors)}** |",
-        f"| TSV files with duplicate assemblies | **{len(dup_paths)}** |",
-        f"| TSV files with header/parse errors | **{tsv_parse_errors}** |",
+        f"- New rows: **{valid_rows}** valid, **{invalid_rows}** invalid",
+        f"- Manifest issues: **{len(manifest_errors)}**",
+        f"- Duplicate assemblies (TSV files): **{len(dup_paths)}**",
+        f"- TSV header/parse errors: **{tsv_parse_errors}**",
         "",
-        f"Merge-base `{merge_base[:7]}…` · base `{base_sha[:7]}…` → head `{head_sha[:7]}…`",
-        "",
-        "**Details:** Open **Files changed** — inline review comments mark each issue on the affected line.",
-        "",
-        "_This summary is updated on every push to this PR._",
+        "_Inline annotations on each failing row — open **Files changed** for details._",
+        "_Updated on every push._",
     ])
 
     return ValidationOutput(
         ok=overall_ok,
         summary_markdown=summary_md,
-        inline_comments=inline_comments,
+        diagnostics=diagnostics,
     )
 
 
@@ -848,7 +824,12 @@ def main() -> int:
     )
     ap.add_argument("--max-download-mb", type=int, default=None)
     ap.add_argument("--output-summary", type=Path, default=None)
-    ap.add_argument("--output-inline-json", type=Path, default=None)
+    ap.add_argument(
+        "--output-rdjsonl",
+        type=Path,
+        default=None,
+        help="reviewdog rdjsonl (one JSON object per line)",
+    )
     args = ap.parse_args()
 
     repo_root = args.repo.resolve()
@@ -886,10 +867,9 @@ def main() -> int:
     print(result.summary_markdown)
     if args.output_summary:
         args.output_summary.write_text(result.summary_markdown, encoding="utf-8")
-    if args.output_inline_json:
-        args.output_inline_json.write_text(
-            json.dumps(result.inline_comments, indent=2), encoding="utf-8"
-        )
+    if args.output_rdjsonl:
+        lines = [json.dumps(d, ensure_ascii=False) for d in result.diagnostics]
+        args.output_rdjsonl.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
     return 0 if result.ok else 1
 

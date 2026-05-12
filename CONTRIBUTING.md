@@ -2,7 +2,7 @@
 
 ## Workflow
 
-1. Fork this repository and create a branch.
+1. Fork this repository.
 2. Add or update a directory `<project_name>/` containing:
    - **`manifest.yaml`** — metadata (`provider_name`, `pipeline_method`, `pipeline_version`, plus optional fields). Must conform to [`schema/manifest.schema.json`](schema/manifest.schema.json).
    - **`annotations.tsv`** — tab-separated file with header exactly:
@@ -33,8 +33,8 @@ For each touched project directory:
    - The **tabix** normalization used by Annotrieve succeeds: comments-first sort, `bgzip`, `tabix -p gff --csi`. This step is skipped if the GFF3 check already failed (saves bandwidth).
 
 Results appear as:
-- A **short summary table** posted (and kept updated) as a PR conversation comment.
-- **Inline review comments** on each problem line under **Files changed**.
+- A **short summary** posted (and kept updated) as a PR conversation comment.
+- **Inline annotations** via [reviewdog](https://github.com/reviewdog/reviewdog) on each problem line under **Files changed**.
 
 ## Local checks
 
@@ -46,7 +46,7 @@ python scripts/validate_pr.py \
   --base "$(git merge-base origin/master HEAD)" \
   --head HEAD \
   --output-summary validation-summary.md \
-  --output-inline-json validation-inline.json
+  --output-rdjsonl validation.rdjsonl
 ```
 
 Pass `--datasets-binary /path/to/datasets` if the binary is not on `PATH`.

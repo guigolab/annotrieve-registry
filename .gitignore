@@ -2,5 +2,5 @@
 __pycache__/
 *.pyc
 validation-summary.md
-validation-inline.json
+validation.rdjsonl
 test/
