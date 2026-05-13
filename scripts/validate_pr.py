@@ -3,6 +3,10 @@
 Validate annotrieve-registry pull requests: manifests, new TSV rows, assemblies,
 URLs, GFF3 shape (ID / Parent), and tabix-compatible processing (Annotrieve-style).
 
+GitHub Actions runs this script inside a prebuilt container (see `docker/ci-validator/`
+and `.github/workflows/publish-ci-validator.yml`): Python 3.11, `tabix`/`bgzip`, pinned
+`datasets`, and `reviewdog` are on `PATH`; `DATASETS_BINARY` defaults to `datasets`.
+
 Assembly accession validation uses the NCBI `datasets` CLI with --inputfile in batches
 (no per-accession HTTP calls to NCBI). URL reachability and GFF3/tabix checks run
 concurrently with a bounded thread pool. GFF3 validity is checked during the same
