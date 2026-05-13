@@ -1,9 +1,0 @@
-# Copy this folder to <your_project_name>/ and replace values before opening a PR.
-provider_name: "Example Lab"
-pipeline_method: "Braker3 + manual curation"
-pipeline_version: "1.2.0"
-project_display_name: "Example community annotations"
-description: "Illustrative manifest for the registry layout (not a real dataset)."
-# contact_email: "pi@example.org"
-# license: "CC-BY-4.0"
-# homepage_url: "https://example.org/project"
