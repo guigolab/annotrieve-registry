@@ -23,7 +23,7 @@
 
 ## CI validation (on every PR)
 
-PR validation runs in a **GHCR container** (`ghcr.io/<lowercase-owner>/<lowercase-repo>/registry-ci:latest`) built from [`docker/ci-validator/Dockerfile`](docker/ci-validator/Dockerfile). It includes Python 3.11, `tabix`/`bgzip`, a pinned [NCBI `datasets` CLI](https://github.com/ncbi/datasets/releases), pip deps from [`requirements.txt`](requirements.txt), and [reviewdog](https://github.com/reviewdog/reviewdog).
+PR validation runs in a **GHCR container**; the image ref is **hardcoded** in [`.github/workflows/validate-pr.yml`](.github/workflows/validate-pr.yml) (keep it in sync with [`publish-ci-validator.yml`](.github/workflows/publish-ci-validator.yml)). The image is built from [`docker/ci-validator/Dockerfile`](docker/ci-validator/Dockerfile) and includes Python 3.11, `tabix`/`bgzip`, a pinned [NCBI `datasets` CLI](https://github.com/ncbi/datasets/releases), pip deps from [`requirements.txt`](requirements.txt), and [reviewdog](https://github.com/reviewdog/reviewdog).
 
 **First-time setup (maintainers):** merge the image workflow, then run **Actions → Publish CI validator image** (or push to `main`/`master` changing `docker/ci-validator/**` or `requirements.txt`) so `:latest` exists before PR checks can pull the image. To bump tools, adjust `DATASETS_RELEASE` / `REVIEWDOG_SEMVER` in the Dockerfile or the publish workflow’s `workflow_dispatch` inputs, then publish again.
 

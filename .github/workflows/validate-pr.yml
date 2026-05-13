@@ -12,25 +12,14 @@ permissions:
   packages: read
 
 jobs:
-  meta:
-    runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.im.outputs.image }}
-    steps:
-      - id: im
-        name: Compute GHCR image ref
-        run: |
-          repo_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
-          echo "image=ghcr.io/${repo_lower}/registry-ci:latest" >> "$GITHUB_OUTPUT"
-
   validate:
-    needs: meta
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
+    # Must match publish-ci-validator.yml (lowercase). Edit if org/repo or tag changes.
     container:
-      image: ${{ needs.meta.outputs.image }}
+      image: ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
