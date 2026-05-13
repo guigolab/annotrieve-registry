@@ -167,7 +167,7 @@ jobs:
           set +e
           reviewdog -f rdjsonl \
             -name "annotrieve-validator" \
-            -reporter=github-pr-check \
+            -reporter=github-pr-review \
             -filter-mode=added \
             -fail-on-error=false \
             < validation.rdjsonl
