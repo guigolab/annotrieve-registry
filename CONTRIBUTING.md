@@ -1,12 +1,12 @@
 # Contributing to the registry
 
-This guide is for **anyone** adding or changing annotation entries—including people who prefer not to install developer tools. You can contribute **only through GitHub in a browser**, or **validate on your machine** using our ready-made container.
+This guide is for **anyone** adding or changing annotation entries in Annotrieve. You can contribute directly **through GitHub in a browser** and trigger the automated validation, or **validate on your machine** using our ready-made container and then open a PR.
 
 ---
 
 ## What you are adding
 
-Each **project** is a folder with two files:
+Each contributors adds their **project** as a folder with two files:
 
 | File | Purpose |
 |------|--------|
@@ -20,7 +20,7 @@ Rules that matter for everyone:
 
 ---
 
-## Path 1 — Contribute with a fork (works in the browser)
+## Contribute with a fork (works in the browser)
 
 This is the usual way: you do **not** need direct write access to this repository.
 
@@ -39,26 +39,26 @@ You can push more commits to the same PR; checks run again each time.
 
 **Please keep each PR to edits in a single `annotations.tsv` file** (one TSV changed per PR). That keeps review and CI predictable.
 
+When your PR is ready and all checks pass, we will review the changes and merge it. After merging, your annotation entries will be available in the next update of Annotrieve (usually within a week).
+
 ---
 
-## What the PR check does (high level)
+### What the PR check does
 
 When you open or update a pull request, a workflow runs in a **pre-built environment** (a Docker image we publish to GitHub Container Registry). In simple terms it:
 
 1. **Compares** your branch to the branch you are merging into, so only **new or changed rows** in `annotations.tsv` are fully re-checked (older rows are not re-downloaded unless the file changed).
 2. Checks **`manifest.yaml`** for every project folder that your PR touches.
 3. For each **new** TSV row, checks that:
-   - the accession looks like a real NCBI assembly and **exists in NCBI** (using the official NCBI `datasets` tool in bulk, not one request per row);
-   - the **URL works** and the downloaded data looks like **GFF3** with the fields Annotrieve expects;
-   - the file can go through the same **tabix-style** steps Annotrieve uses (so we know it is indexable in practice).
+   - the accession looks like a real NCBI assembly and **exists in NCBI** using  NCBI `datasets` tool;
+   - the **URL exists** and the downloaded data is in **GFF3** format;
+   - the annotation file can be sorted and tabindexed as in the main **Annotrieve pipeline**.
 
-If something fails, the PR will show as failed until the data is fixed—but you always get the summary and line-level hints to guide you.
-
-Maintainers: the checker image is built by [`.github/workflows/publish-ci-validator.yml`](.github/workflows/publish-ci-validator.yml). The PR workflow pulls the image named in [`.github/workflows/validate-pr.yml`](.github/workflows/validate-pr.yml); keep those in sync if you rename the package or registry.
+If something fails, the PR will show as failed until the data is fixed, while you always get the summary and line-level hints to guide your fixes.
 
 ---
 
-## Path 2 — Check your TSV locally (Docker, recommended for a “full” dry run)
+### Check your TSV locally (dry run)
 
 If you have **[Docker](https://docs.docker.com/get-docker/)** installed, you can run **the same** validator we use in CI **without** installing Python, tabix, or the NCBI CLI on your laptop.
 
@@ -100,7 +100,7 @@ If the image is **private**, log in once with `docker login ghcr.io` using a Git
 
 ---
 
-## Path 3 — Check locally without Docker (advanced)
+### Check locally without Docker (advanced)
 
 Install **Python 3.11+**, **tabix/bgzip** (htslib), and the **[NCBI datasets CLI](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/download-and-install/)**, then:
 
@@ -117,7 +117,7 @@ Use `--datasets-binary /path/to/datasets` if `datasets` is not on your `PATH`. R
 
 ---
 
-## Optional tuning (for developers)
+### Optional tuning (for developers)
 
 These environment variables only affect the validator when set (defaults are fine for most contributors):
 
