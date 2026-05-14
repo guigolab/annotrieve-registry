@@ -1,48 +1,108 @@
 # Contributing to the registry
 
-## Workflow
+This guide is for **anyone** adding or changing annotation entries—including people who prefer not to install developer tools. You can contribute **only through GitHub in a browser**, or **validate on your machine** using our ready-made container.
 
-1. Fork this repository.
-2. Add or update a directory `<project_name>/` containing:
-   - **`manifest.yaml`** — metadata (`provider_name`, `pipeline_method`, `pipeline_version`, plus optional fields). Must conform to [`schema/manifest.schema.json`](schema/manifest.schema.json).
-   - **`annotations.tsv`** — tab-separated file with header exactly:
+---
 
-     ```text
-     assembly_accession	access_url
-     ```
+## What you are adding
 
-     Each row links one NCBI assembly accession (`GCA_*` / `GCF_*`) to an HTTPS URL for a **GFF3** file (plain or gzip-compressed).
+Each **project** is a folder with two files:
 
-3. Open a pull request against `master`.
+| File | Purpose |
+|------|--------|
+| **`manifest.yaml`** | Describes the provider and pipeline (must match the [JSON schema](schema/manifest.schema.json)). |
+| **`annotations.tsv`** | Lists assemblies and links to GFF3 files. First line is the header; every data line must use a **tab** between the two columns (not spaces). |
 
-## Rules
+Rules that matter for everyone:
 
-- **One row per assembly** within each project's `annotations.tsv` (no duplicate `assembly_accession` values).
-- Rows must be strictly tab-separated — exactly two columns, no spaces as delimiters.
-- URLs must be reachable from the internet and point at data suitable for indexing (see CI checks).
+- **One row per assembly** in each `annotations.tsv` (no duplicate accessions in the same file).
+- Each URL must be a real **`https://`** link to a **GFF3** file that our checks can open.
 
-## CI validation (on every PR)
+---
 
-PR validation runs in a **GHCR container**; the image ref is **hardcoded** in [`.github/workflows/validate-pr.yml`](.github/workflows/validate-pr.yml) (keep it in sync with [`publish-ci-validator.yml`](.github/workflows/publish-ci-validator.yml)). The image is built from [`docker/ci-validator/Dockerfile`](docker/ci-validator/Dockerfile) and includes Python 3.11, `tabix`/`bgzip`, a pinned [NCBI `datasets` CLI](https://github.com/ncbi/datasets/releases), pip deps from [`requirements.txt`](requirements.txt), and [reviewdog](https://github.com/reviewdog/reviewdog).
+## Path 1 — Contribute with a fork (works in the browser)
 
-**First-time setup (maintainers):** merge the image workflow, then run **Actions → Publish CI validator image** (or push to `main`/`master` changing `docker/ci-validator/**` or `requirements.txt`) so `:latest` exists before PR checks can pull the image. To bump tools, adjust `DATASETS_RELEASE` / `REVIEWDOG_SEMVER` in the Dockerfile or the publish workflow’s `workflow_dispatch` inputs, then publish again.
+This is the usual way: you do **not** need direct write access to this repository.
 
-For each touched project directory:
+1. **Fork** this repository on GitHub (button “Fork” on the repo page).
+2. In **your fork**, create a folder for your project (or open an existing one), e.g. `my_lab_my_build/`.
+3. Add or edit **`manifest.yaml`** and **`annotations.tsv`** (you can use “Add file” → “Create new file” if you like).
+4. **Commit** the changes.
+5. Open a **Pull request** from your fork **into the master branch** of this repository.
 
-1. **`manifest.yaml`** is validated against the JSON Schema (required fields: `provider_name`, `pipeline_method`, `pipeline_version`).
-2. **`annotations.tsv`** is checked for duplicate `assembly_accession` values across the whole file on your branch.
-3. For **newly added rows only** (compared to the PR merge-base), CI verifies:
-   - Assembly accession matches `GCA_*/GCF_*` format and exists in NCBI — checked in bulk using the **NCBI datasets CLI** with `--inputfile` in batches of up to 2,000 accessions per call (no individual NCBI HTTP traffic).
-   - URL is reachable and the content is valid **GFF3** — checked in a **single streaming GET**: the HTTP status is verified from the response headers before any body is read (no separate HEAD request), then the body is decompressed on-the-fly while scanning the first 50 MB (decompressed) for at least one `ID=` and one `Parent=` in column 9.
-   - The **tabix** normalization used by Annotrieve succeeds: comments-first sort, `bgzip`, `tabix -p gff --csi`. This step is skipped if the GFF3 check already failed (saves bandwidth).
+After you open or update the PR, **automation runs on our side** (see next section). You will see:
 
-Results appear as:
-- A **short summary** posted (and kept updated) as a PR conversation comment.
-- **Inline annotations** via [reviewdog](https://github.com/reviewdog/reviewdog) on each problem line under **Files changed**.
+- A **short summary** on the PR conversation tab (pass/fail counts in simple language).
+- **Hints on the “Files changed” tab** next to specific lines when something is wrong (so you know what to fix).
 
-## Local checks
+You can push more commits to the same PR; checks run again each time.
 
-Install Python 3.11+, `tabix`/`bgzip` (htslib), and the [NCBI datasets CLI](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/download-and-install/), then from the repo root:
+**Please keep each PR to edits in a single `annotations.tsv` file** (one TSV changed per PR). That keeps review and CI predictable.
+
+---
+
+## What the PR check does (high level)
+
+When you open or update a pull request, a workflow runs in a **pre-built environment** (a Docker image we publish to GitHub Container Registry). In simple terms it:
+
+1. **Compares** your branch to the branch you are merging into, so only **new or changed rows** in `annotations.tsv` are fully re-checked (older rows are not re-downloaded unless the file changed).
+2. Checks **`manifest.yaml`** for every project folder that your PR touches.
+3. For each **new** TSV row, checks that:
+   - the accession looks like a real NCBI assembly and **exists in NCBI** (using the official NCBI `datasets` tool in bulk, not one request per row);
+   - the **URL works** and the downloaded data looks like **GFF3** with the fields Annotrieve expects;
+   - the file can go through the same **tabix-style** steps Annotrieve uses (so we know it is indexable in practice).
+
+If something fails, the PR will show as failed until the data is fixed—but you always get the summary and line-level hints to guide you.
+
+Maintainers: the checker image is built by [`.github/workflows/publish-ci-validator.yml`](.github/workflows/publish-ci-validator.yml). The PR workflow pulls the image named in [`.github/workflows/validate-pr.yml`](.github/workflows/validate-pr.yml); keep those in sync if you rename the package or registry.
+
+---
+
+## Path 2 — Check your TSV locally (Docker, recommended for a “full” dry run)
+
+If you have **[Docker](https://docs.docker.com/get-docker/)** installed, you can run **the same** validator we use in CI **without** installing Python, tabix, or the NCBI CLI on your laptop.
+
+1. **Clone** your fork (or this repo) and `cd` into it so your project folder and `.git` are present.
+2. Pull the published image (same name as in `validate-pr.yml`):
+
+   ```bash
+   docker pull ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest
+   ```
+
+3. Run the validator inside the container, with your repo mounted at `/workspace`:
+
+   ```bash
+   docker run --rm -v "$(pwd):/workspace" -w /workspace \
+     ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest \
+     bash -lc '
+       git config --global --add safe.directory /workspace
+       BASE="$(git merge-base origin/master HEAD 2>/dev/null || git merge-base origin/main HEAD 2>/dev/null || git merge-base master HEAD)"
+       python scripts/validate_pr.py \
+         --base "$BASE" \
+         --head HEAD \
+         --output-summary validation-summary.md \
+         --output-rdjsonl validation.rdjsonl
+       echo "----"; cat validation-summary.md
+     '
+   ```
+
+   Adjust `origin/master` / `origin/main` if your default remote branch has another name. The script exits with code **0** if everything passed and **1** if something failed (same as CI).
+
+4. Optional: set an NCBI API key inside the one-off container for higher rate limits:
+
+   ```bash
+   docker run --rm -e NCBI_API_KEY="your_key_here" -v "$(pwd):/workspace" -w /workspace \
+     ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest \
+     bash -lc 'git config --global --add safe.directory /workspace && ...same python command...'
+   ```
+
+If the image is **private**, log in once with `docker login ghcr.io` using a GitHub **personal access token** that has the `read:packages` scope.
+
+---
+
+## Path 3 — Check locally without Docker (advanced)
+
+Install **Python 3.11+**, **tabix/bgzip** (htslib), and the **[NCBI datasets CLI](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/download-and-install/)**, then:
 
 ```bash
 pip install -r requirements.txt
@@ -53,25 +113,23 @@ python scripts/validate_pr.py \
   --output-rdjsonl validation.rdjsonl
 ```
 
-Pass `--datasets-binary /path/to/datasets` if the binary is not on `PATH`.
-Adjust `--base` if your default branch differs.
+Use `--datasets-binary /path/to/datasets` if `datasets` is not on your `PATH`. Replace `origin/master` with your default branch if needed.
 
-## Tuning (optional)
+---
 
-All knobs are environment variables:
+## Optional tuning (for developers)
+
+These environment variables only affect the validator when set (defaults are fine for most contributors):
 
 | Variable | Default | Purpose |
-|---|---|---|
-| `VALIDATE_DOWNLOAD_WORKERS` | `3` | Parallel GFF download + GFF3 check + tabix pipeline jobs |
-| `VALIDATE_DATASETS_BATCH_SIZE` | `2000` | Accessions per `datasets` CLI call |
-| `VALIDATE_DATASETS_TIMEOUT` | `300` | Seconds before a `datasets` batch call times out |
-| `VALIDATE_SCAN_BYTES` | `52428800` | Decompressed bytes to scan for GFF3 attributes (50 MB) |
-| `VALIDATE_MAX_DOWNLOAD_BYTES` | `524288000` | Max download size per annotation file (500 MB) |
-| `VALIDATE_HTTP_RETRY_TOTAL` | `6` | Max retries per URL/download request |
-| `VALIDATE_HTTP_RETRY_BACKOFF` | `2` | urllib3 backoff factor (`Retry-After` honored on 429) |
-| `VALIDATE_HTTP_RETRY_STATUS` | `429,503` | HTTP status codes that trigger a retry |
-| `VALIDATE_HTTP_USER_AGENT` | (bundled string) | `User-Agent` for HTTP requests |
-| `DATASETS_BINARY` | `datasets` | Path or name of the NCBI datasets CLI binary |
-| `NCBI_API_KEY` | — | NCBI API key; raises NCBI rate limit from 3 → 10 req/s |
+|----------|---------|---------|
+| `VALIDATE_DOWNLOAD_WORKERS` | `3` | Parallel downloads / heavy checks |
+| `VALIDATE_DATASETS_BATCH_SIZE` | `2000` | Accessions per `datasets` batch |
+| `VALIDATE_DATASETS_TIMEOUT` | `300` | Seconds for a `datasets` batch |
+| `VALIDATE_SCAN_BYTES` | `52428800` | How much GFF3 (decompressed) to scan for `ID=` / `Parent=` |
+| `VALIDATE_MAX_DOWNLOAD_BYTES` | `524288000` | Max bytes downloaded per URL |
+| `VALIDATE_HTTP_RETRY_TOTAL` | `6` | Retries on slow or rate-limited URLs |
+| `DATASETS_BINARY` | `datasets` | Path to the `datasets` binary if not on `PATH` |
+| `NCBI_API_KEY` | — | Optional; higher NCBI rate limit when set |
 
-GFF downloads use a **separate `requests.Session` per thread-pool worker** (thread-safe; retries 429/503 with exponential backoff). URL reachability is verified implicitly at the start of each streaming download — no separate HEAD request. Assembly validation runs through the datasets CLI subprocess — no direct NCBI HTTP traffic from Python.
+Assembly checks use the **datasets** subprocess, not ad-hoc NCBI HTTP from Python. URL checks use a **single streaming GET** per row (no separate HEAD request).
