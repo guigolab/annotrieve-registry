@@ -1,6 +1,6 @@
 # Contributing to the registry
 
-This guide is for **anyone** adding or changing annotation entries—including people who prefer not to install developer tools. You can contribute [**through GitHub in a browser**](## Contribute with a fork (works in the browser)), or [**validate on your machine**](## Check your TSV locally (Docker, recommended for a “full” dry run)) using our ready-made container.
+This guide is for **anyone** adding or changing annotation entries in Annotrieve. You can contribute directly **through GitHub in a browser** and trigger the automated validation, or **validate on your machine** using our ready-made container and then open a PR.
 
 ---
 
@@ -58,7 +58,7 @@ If something fails, the PR will show as failed until the data is fixed, while yo
 
 ---
 
-## Check your TSV locally (recommended for a “full” dry run)
+### Check your TSV locally (dry run)
 
 If you have **[Docker](https://docs.docker.com/get-docker/)** installed, you can run **the same** validator we use in CI **without** installing Python, tabix, or the NCBI CLI on your laptop.
 
@@ -100,7 +100,7 @@ If the image is **private**, log in once with `docker login ghcr.io` using a Git
 
 ---
 
-## Path 3 — Check locally without Docker (advanced)
+### Check locally without Docker (advanced)
 
 Install **Python 3.11+**, **tabix/bgzip** (htslib), and the **[NCBI datasets CLI](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/download-and-install/)**, then:
 
@@ -117,7 +117,7 @@ Use `--datasets-binary /path/to/datasets` if `datasets` is not on your `PATH`. R
 
 ---
 
-## Optional tuning (for developers)
+### Optional tuning (for developers)
 
 These environment variables only affect the validator when set (defaults are fine for most contributors):
 
