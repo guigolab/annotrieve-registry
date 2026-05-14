@@ -1,0 +1,9 @@
+# Copy this folder to <your_project_name>/ and replace values before opening a PR.
+provider_name: "Fab Lab"
+pipeline_method: "bho"
+pipeline_version: "0.1.0"
+project_display_name: ""
+description: "a test"
+contact_email: "pi123@example.org"
+license: "CC-BY-4.0"
+homepage_url: "https://genome.crg.es/annotrieve/annotations/"
