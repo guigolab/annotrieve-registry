@@ -18,7 +18,6 @@ on:
     paths:
       - "docker/ci-validator/**"
       - "requirements.txt"
-      - "scripts/validate_pr.py"
       - ".github/workflows/publish-ci-validator.yml"
 
 permissions:

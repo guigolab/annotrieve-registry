@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Validate annotrieve-registry pull requests: manifests, new TSV rows, assemblies,
-URLs, GFF3 shape (ID / Parent), and tabix-compatible processing (Annotrieve-style).
+URLs, GFF3 shape (ID / Parent), tabix-compatible processing (Annotrieve-style),
+duplicate access_url rows, duplicate annotation files (MD5), and collisions with
+checksums/annotation_checksums.tsv on the base branch.
 
 GitHub Actions runs this script inside a prebuilt container (see `docker/ci-validator/`
 and `.github/workflows/publish-ci-validator.yml`): Python 3.11, `tabix`/`bgzip`, pinned
@@ -16,8 +18,10 @@ streaming download used for the tabix pipeline (single HTTP connection per file)
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import sys
 import re
 import shlex
 import shutil
@@ -39,6 +43,19 @@ from urllib3.util import Retry
 import yaml
 from jsonschema import Draft202012Validator
 from jsonschema import FormatChecker
+
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from registry_checksums import (  # noqa: E402
+    CHECKSUM_INDEX_REL,
+    ChecksumIndexEntry,
+    find_index_md5_collisions,
+    format_index_collision,
+    index_by_md5,
+    parse_checksum_index,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration (all overrideable via environment variables)
@@ -322,12 +339,13 @@ def download_check_gff3_stream(
     dest: Path,
     max_bytes: int | None,
     scan_bytes: int,
-) -> tuple[bool, str, bool, str]:
+) -> tuple[bool, str, bool, str, str | None]:
     """
     Stream-download `url` to `dest` while scanning the first `scan_bytes`
     (decompressed) for GFF3 validity (ID= and Parent= in column 9).
 
-    Returns (download_ok, download_err, gff3_ok, gff3_err).
+    Returns (download_ok, download_err, gff3_ok, gff3_err, file_md5_hex).
+    MD5 is computed over the raw downloaded bytes (same on-disk representation).
 
     Single HTTP connection: writes every byte to disk AND decompresses on-the-fly
     for GFF3 scanning. No second download needed for tabix.
@@ -339,13 +357,14 @@ def download_check_gff3_stream(
     leftover = b""
     decomp: zlib.Decompress | None = None
     magic: bytes = b""
+    file_md5 = hashlib.md5()
 
     try:
         with session.get(
             url, stream=True, allow_redirects=True, timeout=HTTP_TIMEOUT
         ) as r:
             if r.status_code >= 400:
-                return False, f"HTTP {r.status_code}", False, ""
+                return False, f"HTTP {r.status_code}", False, "", None
             n = 0
             with open(dest, "wb") as out:
                 for chunk in r.iter_content(chunk_size=65536):
@@ -358,7 +377,9 @@ def download_check_gff3_stream(
                             f"download exceeded {max_bytes} bytes",
                             False,
                             "",
+                            None,
                         )
+                    file_md5.update(chunk)
                     out.write(chunk)
 
                     if gff3_decided:
@@ -406,12 +427,12 @@ def download_check_gff3_stream(
                         gff3_decided = True
 
         ok_g, msg_g = _gff3_result(has_id, has_parent)
-        return True, "", ok_g, msg_g
+        return True, "", ok_g, msg_g, file_md5.hexdigest()
 
     except requests.RequestException as e:
-        return False, str(e), False, ""
+        return False, str(e), False, "", None
     except OSError as e:
-        return False, str(e), False, ""
+        return False, str(e), False, "", None
 
 
 
@@ -469,22 +490,23 @@ def validate_row_heavy(
     acc: str,
     url: str,
     max_download_bytes: int | None,
-) -> list[str]:
+) -> tuple[list[str], str | None]:
     """Download GFF3, check attributes while streaming, then run tabix pipeline."""
     with tempfile.TemporaryDirectory(prefix="arv_h_") as tmp:
         tdir = Path(tmp)
         dl = tdir / "download.bin"
-        ok_d, msg_d, ok_g, msg_g = download_check_gff3_stream(
+        ok_d, msg_d, ok_g, msg_g, file_md5 = download_check_gff3_stream(
             worker_http_session(), url, dl, max_download_bytes, SCAN_BYTES
         )
         if not ok_d:
-            return [f"download failed: {msg_d}"]
+            return [f"download failed: {msg_d}"], None
         if not ok_g:
             # Don't run tabix if content isn't valid GFF3 — saves CPU and I/O
-            return [f"GFF3 check: {msg_g}"]
+            return [f"GFF3 check: {msg_g}"], file_md5
 
         ok_t, msg_t = run_tabix_pipeline(dl, tdir, "pipe")
-        return [f"tabix pipeline: {msg_t}"] if not ok_t else []
+        errs = [f"tabix pipeline: {msg_t}"] if not ok_t else []
+        return errs, file_md5
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -547,6 +569,16 @@ def duplicate_accessions(data_lines: list[str]) -> list[str]:
     return [a for a, c in Counter(accs).items() if c > 1]
 
 
+def duplicate_urls(data_lines: list[str]) -> list[str]:
+    urls = [url for ln in data_lines for _, url, err in [parse_row(ln)] if not err and url]
+    return [u for u, c in Counter(urls).items() if c > 1]
+
+
+def duplicate_file_md5s(md5_by_row: dict[tuple[str, str], str]) -> list[str]:
+    """MD5 hex digests that appear on more than one validated row."""
+    return [m for m, c in Counter(md5_by_row.values()).items() if c > 1]
+
+
 def classify_cheap(
     acc: str | None,
     url: str | None,
@@ -593,6 +625,11 @@ class ValidationOutput:
 # Main validation orchestrator
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _repo_path_from_apath(apath: str) -> str:
+    parent = Path(apath).parent.as_posix()
+    return parent if parent != "." else "."
+
+
 def run_validation(
     repo_root: Path,
     base_sha: str,
@@ -601,6 +638,7 @@ def run_validation(
     schema: dict[str, Any],
     datasets_bin: str,
     max_download_bytes: int | None,
+    checksum_index_rel: str = CHECKSUM_INDEX_REL,
 ) -> ValidationOutput:
     repo = str(repo_root)
     changed = git_changed_files(repo, merge_base, head_sha)
@@ -613,6 +651,25 @@ def run_validation(
     invalid_rows = 0
     tsv_parse_errors = 0
     dup_paths: list[str] = []
+    dup_url_paths: list[str] = []
+    dup_file_paths: list[str] = []
+    dup_index_paths: list[str] = []
+
+    index_entries: list[ChecksumIndexEntry] = []
+    index_by_md5_map: dict[str, list[ChecksumIndexEntry]] = {}
+    index_raw = git_show_text(repo, base_sha, checksum_index_rel)
+    if index_raw is not None:
+        index_entries, index_err = parse_checksum_index(index_raw)
+        if index_err:
+            overall_ok = False
+            emit_diagnostic(
+                diagnostics,
+                checksum_index_rel,
+                1,
+                _fmt_body("annotation_checksums.tsv parse error", [index_err]),
+            )
+        else:
+            index_by_md5_map = index_by_md5(index_entries)
 
     # ── 1. Manifest validation ────────────────────────────────────────────────
     for proj in sorted(projects):
@@ -699,6 +756,23 @@ def run_validation(
                         ]),
                     )
 
+        url_dups = duplicate_urls(head_data)
+        if url_dups:
+            overall_ok = False
+            dup_url_paths.append(apath)
+            url_dup_set = set(url_dups)
+            for line_no, ln in iter_data_line_numbers(head_raw):
+                _, url, _ = parse_row(ln)
+                if url and url in url_dup_set:
+                    emit_diagnostic(
+                        diagnostics,
+                        apath,
+                        line_no,
+                        _fmt_body("Duplicate access_url", [
+                            f"`{url}` appears more than once; each row must use a distinct URL."
+                        ]),
+                    )
+
         nr, nerr = new_rows(base_raw, head_raw)
         if nerr:
             overall_ok = False
@@ -752,6 +826,7 @@ def run_validation(
                 heavy_jobs.append(j)
 
         # 3c. Heavy validation (parallel, bounded)
+        md5_by_row: dict[tuple[str, str], str] = {}
         if heavy_jobs:
             w = min(DOWNLOAD_VALIDATE_WORKERS, len(heavy_jobs))
             with ThreadPoolExecutor(max_workers=w) as ex:
@@ -763,9 +838,76 @@ def run_validation(
                     job = fut_map[fut]
                     key = (job["apath"], job["nl"])
                     try:
-                        row_results[key] = fut.result()
+                        errs, file_md5 = fut.result()
+                        row_results[key] = errs
+                        if file_md5:
+                            md5_by_row[key] = file_md5
                     except Exception as e:
                         row_results[key] = [f"internal error: {e}"]
+
+            # 3d. Duplicate annotation files (MD5 among new rows in the same TSV)
+            by_apath: dict[str, dict[str, list[dict[str, Any]]]] = {}
+            for j in heavy_jobs:
+                key = (j["apath"], j["nl"])
+                md5 = md5_by_row.get(key)
+                if not md5:
+                    continue
+                by_apath.setdefault(j["apath"], {}).setdefault(md5, []).append(j)
+
+            for apath, md5_map in by_apath.items():
+                apath_md5_by_row = {
+                    (j["apath"], j["nl"]): md5
+                    for md5, jobs in md5_map.items()
+                    for j in jobs
+                }
+                dup_set = set(duplicate_file_md5s(apath_md5_by_row))
+                if not dup_set:
+                    continue
+                overall_ok = False
+                dup_file_paths.append(apath)
+                for md5 in dup_set:
+                    for j in md5_map[md5]:
+                        ln = _line_from_preferred(j["preferred"], 1)
+                        emit_diagnostic(
+                            diagnostics,
+                            apath,
+                            ln,
+                            _fmt_body("Duplicate annotation file (MD5)", [
+                                f"checksum `{md5}` appears more than once; "
+                                "each row must refer to a distinct annotation file.",
+                            ]),
+                        )
+
+            # 3e. Duplicate file vs repo-wide checksum index (merged rows on base branch)
+            if index_by_md5_map:
+                for j in heavy_jobs:
+                    key = (j["apath"], j["nl"])
+                    md5 = md5_by_row.get(key)
+                    acc, url = j.get("acc"), j.get("url")
+                    if not md5 or not acc or not url:
+                        continue
+                    repo_path = _repo_path_from_apath(j["apath"])
+                    collisions = find_index_md5_collisions(
+                        md5, repo_path, acc, url, index_by_md5_map
+                    )
+                    if not collisions:
+                        continue
+                    overall_ok = False
+                    if j["apath"] not in dup_index_paths:
+                        dup_index_paths.append(j["apath"])
+                    ln = _line_from_preferred(j["preferred"], 1)
+                    bullets = [format_index_collision(c) for c in collisions[:5]]
+                    if len(collisions) > 5:
+                        bullets.append(f"…and {len(collisions) - 5} more registered row(s).")
+                    emit_diagnostic(
+                        diagnostics,
+                        j["apath"],
+                        ln,
+                        _fmt_body("Duplicate annotation file (MD5, registry index)", [
+                            f"checksum `{md5}` matches an already merged entry:",
+                            *bullets,
+                        ]),
+                    )
 
     # ── 4. Emit inline comments and count pass/fail ───────────────────────────
     for j in all_jobs:
@@ -799,6 +941,9 @@ def run_validation(
         f"- New rows: **{valid_rows}** valid, **{invalid_rows}** invalid",
         f"- Manifest issues: **{len(manifest_errors)}**",
         f"- Duplicate assemblies (TSV files): **{len(dup_paths)}**",
+        f"- Duplicate URLs (TSV files): **{len(dup_url_paths)}**",
+        f"- Duplicate annotation files (MD5, TSV files): **{len(dup_file_paths)}**",
+        f"- Duplicate files vs registry index: **{len(dup_index_paths)}**",
         f"- TSV header/parse errors: **{tsv_parse_errors}**",
         "",
         "_Inline annotations on each failing row — open **Files changed** for details._",
@@ -827,6 +972,11 @@ def main() -> int:
         help="Path / name of the NCBI datasets CLI binary",
     )
     ap.add_argument("--max-download-mb", type=int, default=None)
+    ap.add_argument(
+        "--checksum-index",
+        default=CHECKSUM_INDEX_REL,
+        help="Repo-relative path to the MD5 checksum index TSV on the base branch",
+    )
     ap.add_argument("--output-summary", type=Path, default=None)
     ap.add_argument(
         "--output-rdjsonl",
@@ -866,6 +1016,7 @@ def main() -> int:
         schema,
         resolved,
         max_bytes,
+        args.checksum_index,
     )
 
     if args.output_summary:
