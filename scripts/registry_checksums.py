@@ -10,6 +10,12 @@ CHECKSUM_INDEX_REL = "checksums/annotation_checksums.tsv"
 CHECKSUM_HEADER = "md5_checksum\tassembly_accession\trepo_path\taccess_url"
 CHECKSUM_COLUMNS = CHECKSUM_HEADER.split("\t")
 
+RowKey = tuple[str, str, str]  # (repo_path, assembly_accession, access_url)
+
+
+def normalize_repo_path(repo_path: str) -> str:
+    return repo_path.replace("\\", "/").strip("/") or "."
+
 
 @dataclass(frozen=True)
 class ChecksumIndexEntry:
@@ -18,9 +24,13 @@ class ChecksumIndexEntry:
     repo_path: str
     access_url: str
 
-    def row_key(self) -> tuple[str, str, str]:
+    def row_key(self) -> RowKey:
         """Logical row identity within the registry."""
-        return (self.repo_path, self.assembly_accession, self.access_url)
+        return (
+            normalize_repo_path(self.repo_path),
+            self.assembly_accession,
+            self.access_url,
+        )
 
     def format_location(self) -> str:
         tsv = f"{self.repo_path}/annotations.tsv"
@@ -53,7 +63,7 @@ def parse_checksum_index(content: str | None) -> tuple[list[ChecksumIndexEntry],
             ChecksumIndexEntry(
                 md5_checksum=md5.lower(),
                 assembly_accession=acc,
-                repo_path=repo_path.replace("\\", "/").strip("/") or ".",
+                repo_path=normalize_repo_path(repo_path),
                 access_url=url,
             )
         )
@@ -90,13 +100,28 @@ def find_index_md5_collisions(
     index_by_md5_map: dict[str, list[ChecksumIndexEntry]],
 ) -> list[ChecksumIndexEntry]:
     """Index entries with the same MD5 but a different logical row."""
-    current = (
-        repo_path.replace("\\", "/").strip("/") or ".",
-        assembly_accession,
-        access_url,
-    )
+    current = (normalize_repo_path(repo_path), assembly_accession, access_url)
     hits = index_by_md5_map.get(md5.lower(), [])
     return [e for e in hits if e.row_key() != current]
+
+
+def prune_index_for_repo_path(
+    entries: list[ChecksumIndexEntry],
+    repo_path: str,
+    valid_row_keys: set[RowKey],
+) -> list[ChecksumIndexEntry]:
+    """Drop index rows for `repo_path` that are not in `valid_row_keys` (current TSV)."""
+    rp = normalize_repo_path(repo_path)
+    return [e for e in entries if e.repo_path != rp or e.row_key() in valid_row_keys]
+
+
+def drop_index_for_repo_path(
+    entries: list[ChecksumIndexEntry],
+    repo_path: str,
+) -> list[ChecksumIndexEntry]:
+    """Remove every index row for a project path (e.g. deleted annotations.tsv)."""
+    rp = normalize_repo_path(repo_path)
+    return [e for e in entries if e.repo_path != rp]
 
 
 def entries_for_new_rows(

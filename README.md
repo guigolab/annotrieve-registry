@@ -36,7 +36,7 @@ checksums/annotation_checksums.tsv
 Each row records the **MD5 of the downloaded annotation file** (raw bytes as fetched from `access_url`), plus the assembly accession, project path, and URL. Pull-request validation uses this index to reject new rows whose file content is already registered under another project or assembly.
 
 - Index header: [`schema/annotation_checksums.header`](schema/annotation_checksums.header)
-- Updated on push to `master` / `main` by [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml)
+- Kept in sync on push to `master` / `main` by [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml) (adds new rows, removes entries for deleted TSV lines or projects)
 
 ## How it fits in the larger system
 

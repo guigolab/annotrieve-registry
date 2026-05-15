@@ -40,7 +40,7 @@ The repository keeps a **repo-wide** TSV of file fingerprints:
 | `access_url` | HTTPS link stored in `annotations.tsv` |
 
 - **On pull requests:** new rows are downloaded and hashed during validation. Their MD5 is compared to other new rows in the PR and to the index on the **target branch**, so you get a clear error if the file was already merged elsewhere (including project path and URL in the message).
-- **On merge to `master` / `main`:** [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml) appends checksums for newly merged rows only (no full-registry re-download).
+- **On merge to `master` / `main`:** [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml) syncs the index for changed projects: removes entries for deleted rows (or deleted `annotations.tsv` files) and appends checksums for newly merged rows only.
 
 You do not edit `checksums/annotation_checksums.tsv` by hand; it is maintained by automation.
 

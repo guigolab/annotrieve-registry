@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Append MD5 checksums for newly merged annotations.tsv rows to checksums/annotation_checksums.tsv.
+Sync checksums/annotation_checksums.tsv with annotations.tsv on the default branch.
 
-Run on push to the default branch after PR merge (see .github/workflows/update-checksums.yml).
-Downloads only rows that are new relative to the previous commit.
+On push after merge:
+- Removes index rows for assemblies/URLs no longer present in a project's TSV
+  (including when a project's annotations.tsv is deleted).
+- Downloads and appends MD5 checksums for newly added rows only.
+
+See .github/workflows/update-checksums.yml.
 """
 
 from __future__ import annotations
@@ -20,18 +24,23 @@ if str(_SCRIPTS) not in sys.path:
 from registry_checksums import (  # noqa: E402
     CHECKSUM_INDEX_REL,
     ChecksumIndexEntry,
+    RowKey,
+    drop_index_for_repo_path,
     entries_for_new_rows,
     load_checksum_index,
+    normalize_repo_path,
+    prune_index_for_repo_path,
     render_checksum_index,
 )
 from validate_pr import (  # noqa: E402
     DEFAULT_MAX_DOWNLOAD_BYTES,
     SCAN_BYTES,
-    download_check_gff3_stream,
     build_http_session,
+    download_check_gff3_stream,
     git_show_text,
     new_rows,
     parse_row,
+    parse_tsv,
     run_git,
 )
 
@@ -46,8 +55,20 @@ def git_changed_annotations(repo: str, base_sha: str, head_sha: str) -> list[str
 
 
 def repo_path_from_apath(apath: str) -> str:
-    parent = Path(apath).parent.as_posix()
-    return parent if parent != "." else "."
+    return normalize_repo_path(Path(apath).parent.as_posix())
+
+
+def row_keys_from_annotations_tsv(head_raw: str, repo_path: str) -> set[RowKey]:
+    _, head_data, err = parse_tsv(head_raw)
+    if err:
+        return set()
+    rp = normalize_repo_path(repo_path)
+    keys: set[RowKey] = set()
+    for ln in head_data:
+        acc, url, perr = parse_row(ln)
+        if not perr and acc and url:
+            keys.add((rp, acc, url))
+    return keys
 
 
 def main() -> int:
@@ -80,19 +101,37 @@ def main() -> int:
         return 0
 
     session = build_http_session()
+    index: list[ChecksumIndexEntry] = list(existing)
     additions: list[ChecksumIndexEntry] = []
+    index_changed = False
 
     for apath in changed:
+        repo_path = repo_path_from_apath(apath)
         head_raw = git_show_text(repo, args.head, apath)
+
         if head_raw is None:
-            print(f"Skip missing at HEAD: {apath}", file=sys.stderr)
+            before = len(index)
+            index = drop_index_for_repo_path(index, repo_path)
+            removed = before - len(index)
+            if removed:
+                index_changed = True
+                print(f"Removed {removed} index row(s) for deleted `{apath}`")
             continue
+
+        valid_keys = row_keys_from_annotations_tsv(head_raw, repo_path)
+        before = len(index)
+        index = prune_index_for_repo_path(index, repo_path, valid_keys)
+        pruned = before - len(index)
+        if pruned:
+            index_changed = True
+            print(f"Pruned {pruned} stale index row(s) for `{repo_path}`")
+
         base_raw = git_show_text(repo, base_sha, apath)
         nr, nerr = new_rows(base_raw, head_raw)
         if nerr:
-            print(f"Skip {apath}: {nerr}", file=sys.stderr)
+            print(f"Skip new rows for {apath}: {nerr}", file=sys.stderr)
             continue
-        repo_path = repo_path_from_apath(apath)
+
         for nl in nr:
             acc, url, perr = parse_row(nl)
             if perr or not acc or not url:
@@ -119,15 +158,19 @@ def main() -> int:
             )
             print(f"Hashed {repo_path} {acc} → {file_md5}")
 
-    to_append = entries_for_new_rows(existing, additions)
-    if not to_append:
-        print("No new checksum rows to append.")
+    to_append = entries_for_new_rows(index, additions)
+    if to_append:
+        index = index + to_append
+        index_changed = True
+        print(f"Appending {len(to_append)} new index row(s)")
+
+    if not index_changed:
+        print("Checksum index unchanged.")
         return 0
 
-    merged = existing + to_append
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    index_path.write_text(render_checksum_index(merged), encoding="utf-8")
-    print(f"Appended {len(to_append)} row(s) → {index_path} ({len(merged)} total)")
+    index_path.write_text(render_checksum_index(index), encoding="utf-8")
+    print(f"Wrote {len(index)} row(s) → {index_path}")
     return 0
 
 
