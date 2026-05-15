@@ -1,5 +1,1 @@
 md5_checksum	assembly_accession	repo_path	access_url
-c049b5a92c0238913adb1dc6553bfbb9	GCA_949124755.1	fab	https://raw.githubusercontent.com/apollo994/annotation-vault/main/assets/Polyommatus_icarus_265386.decoy.longest.gff3
-0161344d40af80ab5104303c644ee4e4	GCA_024760925.1	fab	https://raw.githubusercontent.com/apollo994/annotation-vault/main/assets/Polyommatus_icarus_265386.lnc_RNA.longest.gff3
-a5b6a0ee66e92d990c64a89575ce7e69	GCA_000004075.3	fab	https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/004/075/GCA_000004075.3_Cucumber_9930_V3/GCA_000004075.3_Cucumber_9930_V3_genomic.gff.gz
-8af6ddfdad9d880c7f06b9f715351e95	GCA_056869285.1	fab	https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/056/869/285/GCA_056869285.1_ASM5686928v1/GCA_056869285.1_ASM5686928v1_genomic.gff.gz
