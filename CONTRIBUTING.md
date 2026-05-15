@@ -15,8 +15,34 @@ Each contributors adds their **project** as a folder with two files:
 
 Rules that matter for everyone:
 
-- **One row per assembly** in each `annotations.tsv` (no duplicate accessions in the same file).
+- **One row per assembly** in each `annotations.tsv` (no duplicate `assembly_accession` values in the same file).
+- **One row per URL** — the same `access_url` must not appear twice in the same `annotations.tsv`.
+- **One row per file content** — the same annotation file (same MD5 of the downloaded bytes) must not appear twice in the same TSV, and must not duplicate a file already listed in [`checksums/annotation_checksums.tsv`](checksums/annotation_checksums.tsv) under another project or assembly.
 - Each URL must be a real **`https://`** link to a **GFF3** file that our checks can open.
+
+### Annotrieve import (read before you submit)
+
+> **Disclaimer**  
+> After your entry is merged here and flows through the Genome Annotation Tracker, Annotrieve imports community annotations into the live database. **If your GFF3 file content is identical to an annotation already present from NCBI or Ensembl (same MD5 checksum after Annotrieve’s processing), that community row is skipped during import** and will not show up as a separate annotation in the app.  
+> The registry cannot accept duplicate files; Annotrieve will not publish them twice. Only submit assemblies and files that add **new** annotation content.
+
+---
+
+## MD5 checksum index
+
+The repository keeps a **repo-wide** TSV of file fingerprints:
+
+| Column | Meaning |
+|--------|---------|
+| `md5_checksum` | MD5 of the **raw downloaded** GFF3 (plain or `.gz` bytes as fetched) |
+| `assembly_accession` | NCBI assembly accession for that row |
+| `repo_path` | Project folder (e.g. `my_lab_build`) |
+| `access_url` | HTTPS link stored in `annotations.tsv` |
+
+- **On pull requests:** new rows are downloaded and hashed during validation. Their MD5 is compared to other new rows in the PR and to the index on the **target branch**, so you get a clear error if the file was already merged elsewhere (including project path and URL in the message).
+- **On merge to `master` / `main`:** [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml) appends checksums for newly merged rows only (no full-registry re-download).
+
+You do not edit `checksums/annotation_checksums.tsv` by hand; it is maintained by automation.
 
 ---
 
@@ -50,11 +76,15 @@ When you open or update a pull request, a workflow runs in a **pre-built environ
 1. **Compares** your branch to the branch you are merging into, so only **new or changed rows** in `annotations.tsv` are fully re-checked (older rows are not re-downloaded unless the file changed).
 2. Checks **`manifest.yaml`** for every project folder that your PR touches.
 3. For each **new** TSV row, checks that:
-   - the accession looks like a real NCBI assembly and **exists in NCBI** using  NCBI `datasets` tool;
-   - the **URL exists** and the downloaded data is in **GFF3** format;
-   - the annotation file can be sorted and tabindexed as in the main **Annotrieve pipeline**.
+   - the accession looks like a real NCBI assembly and **exists in NCBI** (NCBI `datasets` tool);
+   - the **URL is reachable** and the downloaded data is valid **GFF3** (with `ID=` / `Parent=` in the scanned region);
+   - the file can be sorted and indexed (**tabix** / **bgzip**) like the Annotrieve pipeline;
+   - there are **no duplicate** `assembly_accession`, `access_url`, or file **MD5** values within the TSV;
+   - the file **MD5 is not already** in `checksums/annotation_checksums.tsv` on the base branch (with the existing project path and URL cited in the review comment).
 
 If something fails, the PR will show as failed until the data is fixed, while you always get the summary and line-level hints to guide your fixes.
+
+**Note:** Passing registry validation does not guarantee a new Annotrieve record if the file content is the same as an existing NCBI or Ensembl annotation (see disclaimer above).
 
 ---
 
