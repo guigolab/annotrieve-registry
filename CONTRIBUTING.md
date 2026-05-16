@@ -74,14 +74,14 @@ If you have **[Docker](https://docs.docker.com/get-docker/)** installed, you can
 2. Pull the published image (same name as in `validate-pr.yml`):
 
    ```bash
-   docker pull ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest
+   docker pull ghcr.io/guigolab/annotrieve-registry/registry-ci:latest
    ```
 
 3. Run the validator inside the container, with your repo mounted at `/workspace`:
 
    ```bash
    docker run --rm -v "$(pwd):/workspace" -w /workspace \
-     ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest \
+     ghcr.io/guigolab/annotrieve-registry/registry-ci:latest \
      bash -lc '
        git config --global --add safe.directory /workspace
        BASE="$(git merge-base origin/master HEAD 2>/dev/null || git merge-base origin/main HEAD 2>/dev/null || git merge-base master HEAD)"
@@ -100,7 +100,7 @@ If you have **[Docker](https://docs.docker.com/get-docker/)** installed, you can
 
    ```bash
    docker run --rm -e NCBI_API_KEY="your_key_here" -v "$(pwd):/workspace" -w /workspace \
-     ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest \
+     ghcr.io/guigolab/annotrieve-registry/registry-ci:latest \
      bash -lc 'git config --global --add safe.directory /workspace && ...same python command...'
    ```
 

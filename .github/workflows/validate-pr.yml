@@ -23,7 +23,7 @@ jobs:
         shell: bash
     # Must match publish-ci-validator.yml (lowercase). Edit if org/repo or tag changes.
     container:
-      image: ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest
+      image: ghcr.io/guigolab/annotrieve-registry/registry-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

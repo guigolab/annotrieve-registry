@@ -19,7 +19,7 @@ jobs:
   update-checksums:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/emiliorighi/annotrieve-registry/registry-ci:latest
+      image: ghcr.io/guigolab/annotrieve-registry/registry-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
