@@ -1,0 +1,8 @@
+assembly_accession	access_url
+GCA_048338725.1	https://ftp.ebi.ac.uk/pub/ensemblorganisms/Sus_scrofa/GCA_048338725.1/ensembl/geneset/2025_08/genes.gff3.gz
+GCA_044906185.1	https://ftp.ebi.ac.uk/pub/ensemblorganisms/Sus_scrofa/GCA_044906185.1/ensembl/geneset/2025_08/genes.gff3.gz
+NOT_A_VALID_ACCESSION	https://ftp.ebi.ac.uk/pub/ensemblorganisms/Sus_scrofa/GCA_048338725.1/ensembl/geneset/2025_08/genes.gff3.gz
+GCA_963930625.1	https://example.invalid/nonexistent.gff3.gz
+GCA_048338725.1	https://ftp.ebi.ac.uk/pub/ensemblorganisms/Sus_scrofa/GCA_046128825.1/ensembl/geneset/2025_08/genes.gff3.gz
+GCA_040869115.1	https://ftp.ebi.ac.uk/pub/ensemblorganisms/Sus_scrofa/GCA_044906185.1/ensembl/geneset/2025_08/genes.gff3.gz
+GCA_000820885.1	https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/820/885/GCA_000820885.1_KLDO_01/GCA_000820885.1_KLDO_01_genomic.gff.gz
