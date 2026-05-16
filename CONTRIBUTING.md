@@ -19,6 +19,7 @@ Rules that matter for everyone:
 - **One row per URL** — the same `access_url` must not appear twice in the same `annotations.tsv`.
 - **One row per file content** — the same annotation file (same MD5 of the downloaded bytes) must not appear twice in the same TSV, and must not duplicate a file already listed in [`checksums/annotation_checksums.tsv`](checksums/annotation_checksums.tsv) under another project or assembly.
 - Each URL must be a real **`https://`** link to a **GFF3** file that our checks can open.
+- **Download size:** PR validation **downloads** each `access_url` (up to **500 MiB** of raw bytes per file). Larger files fail. **Gzip-compressed GFF3** (`.gff.gz`) is strongly recommended — smaller transfers, faster checks, and less risk of hitting the limit.
 - **Must add new content** — if your GFF3 matches an existing NCBI/Ensembl annotation (same MD5 after Annotrieve’s processing), it will be skipped on import. Only submit files that add **new** annotation content. See [section below](#md5-checksum-index) for more details on md5_checksum.
 
 ---
@@ -61,6 +62,8 @@ When you open or update a pull request, a workflow runs in a **pre-built environ
    - the file **MD5 is not already** in `checksums/annotation_checksums.tsv` on the base branch (with the existing project path and URL cited in the review comment).
 
 If something fails, the PR will show as failed until the data is fixed, while you always get the summary and line-level hints to guide your fixes.
+
+**Download limit:** For each new row, the validator streams the file from your URL and stops at **500 MiB** (524,288,000 bytes) of downloaded data; larger files fail with a download error. Prefer **gzip-compressed GFF3** when you can — the limit applies to the bytes received (compressed size for `.gz`), so gzip usually keeps you under the cap and speeds up CI.
 
 **Note:** Passing registry validation does not guarantee a new Annotrieve record if the file content is the same as an existing NCBI or Ensembl annotation (see disclaimer above).
 

@@ -11,6 +11,8 @@ Contributors add **project folders**. Each folder contains:
 
 Together, these files describe “this assembly, this annotation file,” in a form that can be checked automatically.
 
+**Annotation URLs:** Pull-request validation **downloads** each linked file (up to **500 MiB** per URL). Files above that size fail. **Gzip-compressed GFF3** (`.gff.gz`) is strongly recommended — smaller downloads, faster checks, and less chance of exceeding the limit.
+
 ### Files you add or edit when you contribute
 
 ```text
