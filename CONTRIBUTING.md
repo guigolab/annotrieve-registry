@@ -19,32 +19,10 @@ Rules that matter for everyone:
 - **One row per URL** — the same `access_url` must not appear twice in the same `annotations.tsv`.
 - **One row per file content** — the same annotation file (same MD5 of the downloaded bytes) must not appear twice in the same TSV, and must not duplicate a file already listed in [`checksums/annotation_checksums.tsv`](checksums/annotation_checksums.tsv) under another project or assembly.
 - Each URL must be a real **`https://`** link to a **GFF3** file that our checks can open.
-
-### Annotrieve import (read before you submit)
-
-> **Disclaimer**  
-> After your entry is merged here and flows through the Genome Annotation Tracker, Annotrieve imports community annotations into the live database. **If your GFF3 file content is identical to an annotation already present from NCBI or Ensembl (same MD5 checksum after Annotrieve’s processing), that community row is skipped during import** and will not show up as a separate annotation in the app.  
-> The registry cannot accept duplicate files; Annotrieve will not publish them twice. Only submit assemblies and files that add **new** annotation content.
+- **Must add new content** — if your GFF3 matches an existing NCBI/Ensembl annotation (same MD5 after Annotrieve’s processing), it will be skipped on import. Only submit files that add **new** annotation content. See [section below](#md5-checksum-index) for more details on md5_checksum.
 
 ---
 
-## MD5 checksum index
-
-The repository keeps a **repo-wide** TSV of file fingerprints:
-
-| Column | Meaning |
-|--------|---------|
-| `md5_checksum` | MD5 of the **raw downloaded** GFF3 (plain or `.gz` bytes as fetched) |
-| `assembly_accession` | NCBI assembly accession for that row |
-| `repo_path` | Project folder (e.g. `my_lab_build`) |
-| `access_url` | HTTPS link stored in `annotations.tsv` |
-
-- **On pull requests:** new rows are downloaded and hashed during validation. Their MD5 is compared to other new rows in the PR and to the index on the **target branch**, so you get a clear error if the file was already merged elsewhere (including project path and URL in the message).
-- **On merge to `master` / `main`:** [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml) syncs the index for changed projects: removes entries for deleted rows (or deleted `annotations.tsv` files) and appends checksums for newly merged rows only.
-
-You do not edit `checksums/annotation_checksums.tsv` by hand; it is maintained by automation.
-
----
 
 ## Contribute with a fork (works in the browser)
 
@@ -163,3 +141,23 @@ These environment variables only affect the validator when set (defaults are fin
 | `NCBI_API_KEY` | — | Optional; higher NCBI rate limit when set |
 
 Assembly checks use the **datasets** subprocess, not ad-hoc NCBI HTTP from Python. URL checks use a **single streaming GET** per row (no separate HEAD request).
+
+---
+
+## MD5 checksum index
+
+The repository keeps a **repo-wide** TSV of file fingerprints:
+
+| Column | Meaning |
+|--------|---------|
+| `md5_checksum` | MD5 of the **raw downloaded** GFF3 (plain or `.gz` bytes as fetched) |
+| `assembly_accession` | NCBI assembly accession for that row |
+| `repo_path` | Project folder (e.g. `my_lab_build`) |
+| `access_url` | HTTPS link stored in `annotations.tsv` |
+
+- **On pull requests:** new rows are downloaded and hashed during validation. Their MD5 is compared to other new rows in the PR and to the index on the **target branch**, so you get a clear error if the file was already merged elsewhere (including project path and URL in the message).
+- **On merge to `master` / `main`:** [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml) syncs the index for changed projects: removes entries for deleted rows (or deleted `annotations.tsv` files) and appends checksums for newly merged rows only.
+
+You do not edit `checksums/annotation_checksums.tsv` by hand; it is maintained by automation.
+
+---
