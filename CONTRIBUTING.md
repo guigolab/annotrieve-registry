@@ -17,10 +17,9 @@ Rules that matter for everyone:
 
 - **One row per assembly** in each `annotations.tsv` (no duplicate `assembly_accession` values in the same file).
 - **One row per URL** — the same `access_url` must not appear twice in the same `annotations.tsv`.
-- **One row per file content** — the same annotation file (same MD5 of the downloaded bytes) must not appear twice in the same TSV, and must not duplicate a file already listed in [`checksums/annotation_checksums.tsv`](checksums/annotation_checksums.tsv) under another project or assembly.
 - Each URL must be a real **`https://`** link to a **GFF3** file that our checks can open.
 - **Download size:** PR validation **downloads** each `access_url` (up to **500 MiB** of raw bytes per file). Larger files fail. **Gzip-compressed GFF3** (`.gff.gz`) is strongly recommended — smaller transfers, faster checks, and less risk of hitting the limit.
-- **Must add new content** — if your GFF3 matches an existing NCBI/Ensembl annotation (same MD5 after Annotrieve’s processing), it will be skipped on import. Only submit files that add **new** annotation content. See [section below](#md5-checksum-index) for more details on md5_checksum.
+- **Must add new content** — if your GFF3 matches an existing NCBI/Ensembl annotation, it will be skipped on import. Only submit files that add **new** annotation content. File-content deduplication is handled downstream by the [Genome Annotation Tracker](https://github.com/guigolab/genome-annotation-tracker) and Annotrieve import.
 
 ---
 
@@ -58,8 +57,7 @@ When you open or update a pull request, a workflow runs in a **pre-built environ
    - the accession looks like a real NCBI assembly and **exists in NCBI** (NCBI `datasets` tool);
    - the **URL is reachable** and the downloaded data is valid **GFF3** (with `ID=` / `Parent=` in the scanned region);
    - the file can be sorted and indexed (**tabix** / **bgzip**) like the Annotrieve pipeline;
-   - there are **no duplicate** `assembly_accession`, `access_url`, or file **MD5** values within the TSV;
-   - the file **MD5 is not already** in `checksums/annotation_checksums.tsv` on the base branch (with the existing project path and URL cited in the review comment).
+   - there are **no duplicate** `assembly_accession` or `access_url` values within the TSV.
 
 If something fails, the PR will show as failed until the data is fixed, while you always get the summary and line-level hints to guide your fixes.
 
@@ -144,23 +142,3 @@ These environment variables only affect the validator when set (defaults are fin
 | `NCBI_API_KEY` | — | Optional; higher NCBI rate limit when set |
 
 Assembly checks use the **datasets** subprocess, not ad-hoc NCBI HTTP from Python. URL checks use a **single streaming GET** per row (no separate HEAD request).
-
----
-
-## MD5 checksum index
-
-The repository keeps a **repo-wide** TSV of file fingerprints:
-
-| Column | Meaning |
-|--------|---------|
-| `md5_checksum` | MD5 of the **raw downloaded** GFF3 (plain or `.gz` bytes as fetched) |
-| `assembly_accession` | NCBI assembly accession for that row |
-| `repo_path` | Project folder (e.g. `my_lab_build`) |
-| `access_url` | HTTPS link stored in `annotations.tsv` |
-
-- **On pull requests:** new rows are downloaded and hashed during validation. Their MD5 is compared to other new rows in the PR and to the index on the **target branch**, so you get a clear error if the file was already merged elsewhere (including project path and URL in the message).
-- **On merge to `master` / `main`:** [`.github/workflows/update-checksums.yml`](.github/workflows/update-checksums.yml) syncs the index for changed projects: removes entries for deleted rows (or deleted `annotations.tsv` files) and appends checksums for newly merged rows only.
-
-You do not edit `checksums/annotation_checksums.tsv` by hand; it is maintained by automation.
-
----
