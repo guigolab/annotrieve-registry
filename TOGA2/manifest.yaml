@@ -1,0 +1,6 @@
+provider_name: "Hiller Lab, Senckenberg Research Institute"
+pipeline_method: "TOGA2 comparative genome annotation pipeline"
+pipeline_version: "2.0.9"
+project_display_name: "TOGA2 vertebrate gene annotations"
+description: "Comparative gene annotations generated with the TOGA2 pipeline. Different vertebrate clades were annotated using clade-specific reference assemblies for mammals, birds, testudines, and percomorph fishes. See the project homepage for details on reference assemblies and methodology."
+homepage_url: "https://genome.senckenberg.de"
