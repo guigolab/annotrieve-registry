@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 import re
 import shlex
 import shutil
@@ -27,7 +26,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import zlib
+from http.client import IncompleteRead
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import ProtocolError
 from urllib3.util import Retry
 import yaml
 from jsonschema import Draft202012Validator
@@ -75,7 +77,7 @@ USER_AGENT = os.environ.get(
     "annotrieve-registry-validator/1.0 (+https://github.com)",
 )
 
-# Retries on 429 / 503 for URL HEAD and GFF file downloads
+# Retries on 429 / 503 for the initial HTTP response (urllib3 adapter)
 _HTTP_RETRY_TOTAL = max(2, int(os.environ.get("VALIDATE_HTTP_RETRY_TOTAL", "6")))
 _HTTP_RETRY_BACKOFF = float(os.environ.get("VALIDATE_HTTP_RETRY_BACKOFF", "2"))
 _HTTP_RETRY_STATUS: tuple[int, ...] = tuple(
@@ -83,6 +85,20 @@ _HTTP_RETRY_STATUS: tuple[int, ...] = tuple(
     for x in os.environ.get("VALIDATE_HTTP_RETRY_STATUS", "429,503").split(",")
     if x.strip().isdigit()
 ) or (429, 503)
+
+# Full re-download attempts on transient stream / connection errors (IncompleteRead, etc.)
+_DOWNLOAD_RETRY_TOTAL = max(
+    1, int(os.environ.get("VALIDATE_DOWNLOAD_RETRY_TOTAL", "5"))
+)
+
+_RETRYABLE_MSG_FRAGMENTS = (
+    "incompleteread",
+    "connection broken",
+    "connection reset",
+    "connection aborted",
+    "timed out",
+    "temporarily unavailable",
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -318,21 +334,57 @@ def _gff3_result(has_id: bool, has_parent: bool) -> tuple[bool, str]:
     return False, "no Parent= found in GFF3 attributes in scanned region"
 
 
-def download_check_gff3_stream(
+def _is_retryable_download_failure(
+    msg: str, exc: BaseException | None = None
+) -> bool:
+    """True for transient transport errors; false for permanent HTTP / size limits."""
+    if exc is not None:
+        if isinstance(
+            exc,
+            (requests.ConnectionError, requests.Timeout, requests.ChunkedEncodingError),
+        ):
+            return True
+        cur: BaseException | None = exc
+        while cur is not None:
+            if isinstance(cur, IncompleteRead):
+                return True
+            if isinstance(cur, ProtocolError) and "incompleteread" in str(cur).lower():
+                return True
+            nxt = cur.__cause__
+            if nxt is None and cur.__context__ is not cur:
+                nxt = cur.__context__
+            cur = nxt
+
+    msg_l = msg.lower()
+    if msg_l.startswith("http "):
+        parts = msg_l.split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            code = int(parts[1])
+            if code == 408 or code >= 500:
+                return True
+            return False
+        return False
+
+    if msg_l.startswith("download exceeded "):
+        return False
+
+    return any(frag in msg_l for frag in _RETRYABLE_MSG_FRAGMENTS)
+
+
+def _download_check_gff3_stream_once(
     session: requests.Session,
     url: str,
     dest: Path,
     max_bytes: int | None,
     scan_bytes: int,
+    *,
+    close_connection: bool = False,
 ) -> tuple[bool, str, bool, str]:
     """
-    Stream-download `url` to `dest` while scanning the first `scan_bytes`
-    (decompressed) for GFF3 validity (ID= and Parent= in column 9).
+    One attempt to stream-download `url` to `dest` while scanning the first
+    `scan_bytes` (decompressed) for GFF3 validity (ID= and Parent= in column 9).
 
     Returns (download_ok, download_err, gff3_ok, gff3_err).
-
-    Single HTTP connection: writes every byte to disk AND decompresses on-the-fly
-    for GFF3 scanning. No second download needed for tabix.
     """
     has_id = False
     has_parent = False
@@ -342,9 +394,15 @@ def download_check_gff3_stream(
     decomp: zlib.Decompress | None = None
     magic: bytes = b""
 
+    headers = {"Connection": "close"} if close_connection else None
+
     try:
         with session.get(
-            url, stream=True, allow_redirects=True, timeout=HTTP_TIMEOUT
+            url,
+            stream=True,
+            allow_redirects=True,
+            timeout=HTTP_TIMEOUT,
+            headers=headers,
         ) as r:
             if r.status_code >= 400:
                 return False, f"HTTP {r.status_code}", False, ""
@@ -415,6 +473,43 @@ def download_check_gff3_stream(
     except OSError as e:
         return False, str(e), False, ""
 
+
+def download_check_gff3_stream(
+    session: requests.Session,
+    url: str,
+    dest: Path,
+    max_bytes: int | None,
+    scan_bytes: int,
+) -> tuple[bool, str, bool, str]:
+    """
+    Stream-download `url` to `dest` with retries on transient connection errors.
+
+    Returns (download_ok, download_err, gff3_ok, gff3_err).
+    """
+    last_err = ""
+    for attempt in range(_DOWNLOAD_RETRY_TOTAL):
+        dest.unlink(missing_ok=True)
+        ok_d, msg_d, ok_g, msg_g = _download_check_gff3_stream_once(
+            session,
+            url,
+            dest,
+            max_bytes,
+            scan_bytes,
+            close_connection=(attempt > 0),
+        )
+        if ok_d:
+            return ok_d, msg_d, ok_g, msg_g
+        last_err = msg_d
+        if not _is_retryable_download_failure(msg_d):
+            return ok_d, msg_d, ok_g, msg_g
+        if attempt < _DOWNLOAD_RETRY_TOTAL - 1:
+            time.sleep(_HTTP_RETRY_BACKOFF * (2**attempt))
+    return (
+        False,
+        f"download failed after {_DOWNLOAD_RETRY_TOTAL} attempts: {last_err}",
+        False,
+        "",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
