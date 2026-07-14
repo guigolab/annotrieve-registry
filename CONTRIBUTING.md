@@ -137,7 +137,8 @@ These environment variables only affect the validator when set (defaults are fin
 | `VALIDATE_DATASETS_TIMEOUT` | `300` | Seconds for a `datasets` batch |
 | `VALIDATE_SCAN_BYTES` | `52428800` | How much GFF3 (decompressed) to scan for `ID=` / `Parent=` |
 | `VALIDATE_MAX_DOWNLOAD_BYTES` | `524288000` | Max bytes downloaded per URL |
-| `VALIDATE_HTTP_RETRY_TOTAL` | `6` | Retries on slow or rate-limited URLs |
+| `VALIDATE_HTTP_RETRY_TOTAL` | `6` | Retries on HTTP 429/503 status codes (initial response only) |
+| `VALIDATE_DOWNLOAD_RETRY_TOTAL` | `5` | Full re-download attempts on transient connection errors |
 | `DATASETS_BINARY` | `datasets` | Path to the `datasets` binary if not on `PATH` |
 | `NCBI_API_KEY` | — | Optional; higher NCBI rate limit when set |
 
